@@ -88,7 +88,9 @@ jobs:
           echo "REMOVES=$REMOVES"
 
           FILES_ARG=""
-          [ -d "$GITHUB_WORKSPACE/files" ] && FILES_ARG="FILES=$GITHUB_WORKSPACE/files"
+          if [ -d "$GITHUB_WORKSPACE/files" ]; then
+            FILES_ARG="FILES=$GITHUB_WORKSPACE/files"
+          fi
 
           # ImageBuilder 里 "-pkg" 表示从默认列表剔除
           make image PROFILE="$PROFILE" PACKAGES="$PKGS $REMOVES" $FILES_ARG

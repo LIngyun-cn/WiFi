@@ -17,6 +17,9 @@ if (-not (Test-Path '.git')) {
 git config user.name  $CommitName
 git config user.email $CommitEmail
 
+# 本机 git 默认走 schannel，会被卡巴斯基拦成 SEC_E_NO_CREDENTIALS，必须切 openssl
+git config --local http.sslBackend openssl
+
 git add -A
 git -c core.quotepath=false commit -m "cloud imagebuilder: OpenWrt 24.10.8 / xiaomi_miwifi-3a" 2>$null
 if ($LASTEXITCODE -ne 0) { Write-Host '[i] 没有新改动可提交，继续推送' }
