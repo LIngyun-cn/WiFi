@@ -1,10 +1,25 @@
-# 首次启动执行一次：语言、无线、SSH 密码（示例，改成你自己的）
+# 首次启动执行一次：语言、无线、区域
+# 只在 SSID 还是 OpenWrt 默认值/空的时候才写，避免 sysupgrade 后被覆盖回默认名
 uci -q set luci.main.lang=zh_cn
 
-uci -q delete wireless.radio0.disabled
-uci -q delete wireless.radio1.disabled
-uci -q set wireless.default_radio0.ssid='Ciallo'
-uci -q set wireless.default_radio1.ssid='Ciallo'
+uci -q set wireless.radio0.disabled='0'
+uci -q set wireless.radio1.disabled='0'
+uci -q set wireless.radio0.country='CN'
+uci -q set wireless.radio1.country='CN'
+
+SSID='Ciallo～(∠・ω< )⌒★'
+PSK='0d00@0721'
+
+for s in default_radio0 default_radio1; do
+	cur=$(uci -q get "wireless.$s.ssid")
+	case "$cur" in
+		''|OpenWrt*)
+			uci -q set "wireless.$s.ssid=$SSID"
+			uci -q set "wireless.$s.encryption='psk2'"
+			uci -q set "wireless.$s.key=$PSK"
+			;;
+	esac
+done
 
 uci commit
 

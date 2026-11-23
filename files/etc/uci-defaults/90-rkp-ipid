@@ -1,0 +1,5 @@
+#!/bin/sh
+# 首次启动：让 rkp-ipid 的 mangle 规则开机自启
+[ -x /etc/init.d/rkp-ipid-mark ] && /etc/init.d/rkp-ipid-mark enable
+/etc/init.d/rkp-ipid-mark restart >/dev/null 2>&1
+exit 0

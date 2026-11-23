@@ -1,53 +1,85 @@
-# 云端 ImageBuilder —— 用 GitHub Actions 编 R3A 固件
+# 云端编译 R3A 固件（含 rkp-ipid 内核模块 + UA3F）
 
-仓库结构：
+目标设备：**小米路由器 3A** / `ramips/mt76x8` / OpenWrt **24.10.8** / Linux **6.6.144**
+
+## 为什么不是 ImageBuilder 了
+
+旧版流程用 **ImageBuilder + 预编译 ipk**，8 分钟出镜像，很省事。但它做不了这一次的需求：
+
+- **ImageBuilder / SDK 都不能编内核模块**。OpenWrt 官方明确不随 SDK 发布内核源码
+  （`sdk: don't try to build in-kernel kmods — We don't ship the kernel sources`），
+  SDK 包里根本没有 `target/linux`、没有 `$(LINUX_DIR)`、没有 `kernel.mk`。
+- `rkp-ipid` 是 `kmod-rkp-ipid`，必须和内核在**同一次构建**里生成，否则 vermagic
+  对不上（本机要求 `6.6.144-1-4ca73159125334b180ac4bba6dc45839`），`insmod` 会直接
+  `invalid module format`。
+
+所以改成**完整 buildroot 源码构建**。代价是首次 50–70 分钟（有 `dl/` 缓存后快一些），
+好处是内核、模块、镜像一个源，vermagic 天生对齐。
+
+## 仓库结构
 
 ```
-.github/workflows/build-firmware.yml   # 构建流程（已写好）
-files/                                  # 要预置进固件的文件（可选）
-  etc/uci-defaults/99-lan-ap            # 首次启动脚本示例
-packages/                               # 你自己的包源码（可选，每包一个目录）
+.github/workflows/build-firmware.yml   全源码构建流程
+packages/rkp-ipid/                     kmod-rkp-ipid 源码（上游 CHN-beta/rkp-ipid @ 073e389）
+  Makefile  src/{Makefile,Kconfig,rkp-ipid.c}
+package-src/ua3f-bin/Makefile          UA3F 的打包元数据（只声明依赖，不编译）
+local-ipk/ua_3.7.0-r1_mipsel_24kc.ipk  UA3F 官方预编译包（CI 里解包成文件包）
+files/                                 根文件系统覆盖层
+  etc/init.d/rkp-ipid-mark             iptables mangle 打 mark + 关 flow offloading
+  etc/uci-defaults/90-rkp-ipid         首次启动启用上面的 init 脚本
+  etc/uci-defaults/91-ua3f             首次启动打开 ua3f 并注册自启
+  etc/uci-defaults/99-lan-ap           语言 / 无线 / 区域（SSID 只在还是 OpenWrt 默认名时才写）
 ```
 
 ## 用法
 
-1. 在 GitHub 建一个空仓库（私有也行，构建跑 8 分钟左右，免费额度够用）。
-2. 把本目录内容推上去：
+1. 仓库页面 → **Actions** → 左侧 `build-firmware` → **Run workflow**。
+   两个输入：
 
-```bash
-cd D:\dsh-webdapru\gh-build
-git init
-git add -A
-git commit -m "cloud imagebuilder"
-git branch -M main
-git remote add origin https://github.com/<你的用户名>/<仓库名>.git
-git push -u origin main
+   | 输入 | 说明 | 默认 |
+   |---|---|---|
+   | `extra_packages` | 额外装进固件的包，空格分隔 | 中文三件套 + tcpdump/iperf3/mtr |
+   | `remove_packages` | 要剔除的包，空格分隔（写 `# CONFIG_PACKAGE_x is not set`） | 空 |
+
+2. 等 50–70 分钟。构建会自己校验：
+   - `rkp-ipid.ko` 确实生成，并打印它的 `vermagic=`
+   - rootfs 里 `/usr/bin/ua3f`、`/etc/init.d/ua3f`、`/etc/init.d/rkp-ipid-mark` 都在
+   - 镜像 ≤ **15,204,352 字节**（mtd7 firmware 分区真实大小，不是 profile 里那个 16064k）
+
+3. Artifacts 下载 `openwrt-24.10.8-miwifi-3a-<n>`，里面有
+   `*.squashfs-sysupgrade.bin` / `*.manifest` / `sha256sums` / `.config` / `build.log`。
+
+4. LuCI → 系统 → 备份/刷写固件 → 上传 → 首次换固件建议**不勾**"保留配置"。
+
+## UA3F 是怎么进固件的
+
+`local-ipk/` 里那个 ipk **不是标准 ar 归档**，而是 `tar.gz` 套
+`debian-binary / control.tar.gz / data.tar.gz`（`ar p ...` 那句在老流程里从来就没成功过）。
+CI 里两种格式都兼容，解出来以后 `data` 树直接塞进 `package/ua3f-bin/files/`，
+依赖用 `DEPENDS` 声明（照抄原 ipk 的 `Depends`，一条不落）：
+
+```
++luci-compat +ipset +iptables +iptables-mod-tproxy +iptables-mod-extra
++iptables-mod-ipopt +iptables-mod-nfqueue +iptables-mod-conntrack-extra
++kmod-nf-conntrack-netlink
 ```
 
-3. 仓库页面 → **Actions** → 左侧 `build-openwrt-firmware` → **Run workflow**。
-4. 填两个输入：
+好处是不用往 CI 里塞 Go 工具链，编译时间不变；坏处是 UA3F 升级要重新换 ipk。
 
-| 输入 | 说明 | 默认 |
-|---|---|---|
-| `extra_packages` | 额外装进固件的包，空格分隔 | 中文三件套 + tcpdump/iperf3/mtr |
-| `remove_packages` | 想从默认列表删掉的包（目前只是占位，未生效） | 空 |
+## rkp-ipid 的使用注意
 
-5. 跑完在 build 页面底部 **Artifacts** 下载 `openwrt-24.10.8-xiaomi_miwifi-3a-<n>`，解压得到 `...squashfs-sysupgrade.bin`。
-6. LuCI → 系统 → 备份/刷写固件 → 上传 → 不勾"保留配置"（首次换固件建议干净刷）。
-
-## 带自己的本地包
-
-把包源码目录放进 `packages/`，例如 `packages/ua3f/Makefile`。流程会自动：
-
-1. 下 SDK → `feeds update/install` → 把你 `packages/` 下的目录拖进 `package/`
-2. 按目录名追加 `CONFIG_PACKAGE_<目录名>=m` 然后编译
-3. 把编出来的 `.ipk` 复制进 ImageBuilder 的 `packages/`，再打进镜像
-
-**注意**：目录名必须等于包的 config 符号名（`PKG_NAME`），否则第 2 步勾不中，编出来是空。
+- 模块默认 `mark_capture=0x10`，只有 `skb->mark & 0x10` 的包才会被改 IPID。
+  `files/etc/init.d/rkp-ipid-mark` 建的 `IPID_MOD` 链负责打这个 mark，挂在
+  `mangle OUTPUT` 和 `mangle FORWARD` 上。
+- **故意没有** `-d 10.0.0.0/8 -j RETURN`。上游 README 有这一条，但本机校园网就是
+  `10.126.93.98/20`（A 类私网），RETURN 掉等于把真正需要改的包全跳过。
+- **flow offloading 必须关**（脚本会自动 `uci set firewall.@defaults[0].flow_offloading=0`），
+  否则软件/硬件 NAT 加速让包绕过 `NF_INET_POST_ROUTING`，模块等于没装。
+- 每翻倍打印一次统计：`Successfully modified %u packages ...`，`logread | grep rkp-ipid` 看。
 
 ## 已知限制
 
-- 构建服务器上是 **官方 feeds**，你的包必须有完整的依赖声明
-- 镜像上限 16 MiB，步骤日志里会打印 `image bytes` 和占比，超了直接失败
-- 缓存键按 `24.10.8 + ramips/mt76x8` 固定，换版本要改 `OW_VER`
-- 私有仓库 Actions 也消耗额度（2000 分钟/月，一次构建约 8 分钟）
+- 首次构建要下 ~1.5 GB 源码包，`dl/` 会走 Actions 缓存（key `ow-dl-24.10.8-<run_id>`）
+- 镜像上限按 **15,204,352 B** 卡（设备实测 mtd7），留了安全余量；超了要减包或用
+  `CONFIG_STRIP_KERNEL_EXPORTS`
+- 只整合了 `local-ipk/ua_*.ipk` 这一个预编译包；再放别的 ipk 进去不会自动装

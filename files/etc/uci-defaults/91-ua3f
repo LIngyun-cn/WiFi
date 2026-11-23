@@ -1,0 +1,7 @@
+#!/bin/sh
+# 首次启动：打开 ua3f 并注册开机自启
+# ua3f 默认 option enabled '0'，不打开就等于装了个摆设
+uci -q set ua3f.enabled.enabled='1'
+uci -q commit ua3f
+[ -x /etc/init.d/ua3f ] && /etc/init.d/ua3f enable
+exit 0

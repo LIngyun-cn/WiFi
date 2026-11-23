@@ -1,0 +1,70 @@
+#!/bin/sh /etc/rc.common
+# rkp-ipid-mark —— 给需要改写 IPv4 ID 字段的包打上 0x10 mark
+#
+# rkp-ipid 内核模块挂在 NF_INET_POST_ROUTING / NF_IP_PRI_NAT_SRC，只有当
+# skb->mark & 0x10 时才改写 IPID，所以必须自己建 mangle 规则打 mark。
+# 规则内容取自上游 README，唯一改动：
+#   * 不 RETURN 10.0.0.0/8 —— 本机校园网就是 10.126.93.98/20（A 类私网段），
+#     若 RETURN 掉 10/8，所有发往校园网网关和校内主机的包都会跳过改写，
+#     而这些包恰恰是被检测的对象。
+#   * 顺手关掉 flow offloading —— 软件/硬件 NAT 加速会让包绕过 POST_ROUTING
+#     hook，rkp-ipid 直接失效。
+
+START=99
+STOP=10
+USE_PROCD=0
+
+CHAIN=IPID_MOD
+MARK=0x10/0x10
+
+ipt() {
+	iptables -t mangle "$@" 2>/dev/null
+}
+
+rules_up() {
+	ipt -N "$CHAIN"
+	ipt -F "$CHAIN"
+
+	# 这些网段的 IPID 不用管（注意：故意没有 10.0.0.0/8）
+	ipt -A "$CHAIN" -d 0.0.0.0/8     -j RETURN
+	ipt -A "$CHAIN" -d 127.0.0.0/8   -j RETURN
+	ipt -A "$CHAIN" -d 172.16.0.0/12 -j RETURN
+	ipt -A "$CHAIN" -d 192.168.0.0/16 -j RETURN
+	ipt -A "$CHAIN" -d 255.0.0.0/8   -j RETURN
+
+	ipt -A "$CHAIN" -j MARK --set-xmark "$MARK"
+
+	# 挂到 OUTPUT 和 FORWARD 上，幂等
+	iptables -t mangle -C OUTPUT  -j "$CHAIN" 2>/dev/null || ipt -A OUTPUT  -j "$CHAIN"
+	iptables -t mangle -C FORWARD -j "$CHAIN" 2>/dev/null || ipt -A FORWARD -j "$CHAIN"
+}
+
+rules_down() {
+	ipt -D OUTPUT  -j "$CHAIN"
+	ipt -D FORWARD -j "$CHAIN"
+	ipt -F "$CHAIN"
+	ipt -X "$CHAIN"
+}
+
+kill_offload() {
+	uci -q get firewall.@defaults[0] >/dev/null || return 0
+	uci -q set firewall.@defaults[0].flow_offloading='0'
+	uci -q set firewall.@defaults[0].flow_offloading_hw='0'
+	uci -q commit firewall
+}
+
+start() {
+	kill_offload
+	rules_up
+	logger -t rkp-ipid "mangle mark $MARK installed (flow offloading off)"
+}
+
+stop() {
+	rules_down
+}
+
+restart() {
+	stop
+	sleep 1
+	start
+}
