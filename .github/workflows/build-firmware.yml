@@ -79,7 +79,19 @@ jobs:
             find "$GITHUB_WORKSPACE"/openwrt-sdk-*/bin/packages -name '*.ipk' -exec cp -v {} packages/ \;
           fi
 
-          PKGS="luci ${{ github.event.inputs.extra_packages }}"
+          # 已经编好的本地 ipk（仓库里 local-ipk/*.ipk），直接放进 IB 并自动加入包列表
+          LOCAL_NAMES=""
+          if compgen -G "$GITHUB_WORKSPACE/local-ipk/*.ipk" > /dev/null; then
+            cp -v "$GITHUB_WORKSPACE"/local-ipk/*.ipk packages/
+            for f in "$GITHUB_WORKSPACE"/local-ipk/*.ipk; do
+              n=$(ar p "$f" control.tar.gz 2>/dev/null | tar -xzO ./control 2>/dev/null | sed -n 's/^Package: *//p' | head -1)
+              [ -z "$n" ] && n=$(basename "$f" | cut -d_ -f1)
+              LOCAL_NAMES="$LOCAL_NAMES $n"
+            done
+            echo "LOCAL_IPK=$LOCAL_NAMES"
+          fi
+
+          PKGS="luci ${{ github.event.inputs.extra_packages }} $LOCAL_NAMES"
           REMOVES=""
           for p in ${{ github.event.inputs.remove_packages }}; do
             REMOVES="$REMOVES -$p"
