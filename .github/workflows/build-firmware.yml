@@ -20,7 +20,7 @@ on:
       extra_packages:
         description: '额外软件包 (空格分隔，不带 CONFIG_PACKAGE_ 前缀)'
         required: false
-        default: 'luci-i18n-base-zh-cn luci-i18n-firewall-zh-cn luci-i18n-package-manager-zh-cn tcpdump iperf3 mtr'
+        default: 'luci-i18n-base-zh-cn luci-i18n-firewall-zh-cn luci-i18n-package-manager-zh-cn tcpdump iperf3 mtr-nojson'
       remove_packages:
         description: '要从固件里剔除的包 (空格分隔，可留空)'
         required: false
@@ -164,8 +164,8 @@ jobs:
       - name: 生成 .config
         env:
           # push 触发时 github.event.inputs.* 是空的，必须带兜底默认值，
-          # 否则中文界面 / tcpdump / iperf3 / mtr 会静默丢掉（第一次构建就踩了这个坑）
-          EXTRA_PKGS: ${{ github.event.inputs.extra_packages || 'luci-i18n-base-zh-cn luci-i18n-firewall-zh-cn luci-i18n-package-manager-zh-cn tcpdump iperf3 mtr' }}
+          # 否则中文界面 / tcpdump / iperf3 / mtr-nojson 会静默丢掉（第一次构建就踩了这个坑）
+          EXTRA_PKGS: ${{ github.event.inputs.extra_packages || 'luci-i18n-base-zh-cn luci-i18n-firewall-zh-cn luci-i18n-package-manager-zh-cn tcpdump iperf3 mtr-nojson' }}
           REMOVE_PKGS: ${{ github.event.inputs.remove_packages }}
         run: |
           set -euo pipefail
@@ -182,10 +182,12 @@ jobs:
           CONFIG_ALL_NONSHARED=n
           CONFIG_PACKAGE_luci=y
           CONFIG_PACKAGE_luci-compat=y
+          # luci-i18n-*-zh-cn 是 HIDDEN 包，必须用 LUCI_LANG 开关带出来
+          CONFIG_LUCI_LANG_zh_Hans=y
           CONFIG_PACKAGE_kmod-rkp-ipid=y
           CONFIG_PACKAGE_ua3f-bin=y
           CONFIG_PACKAGE_ipset=y
-          CONFIG_PACKAGE_iptables=y
+          CONFIG_PACKAGE_iptables-nft=y
           CONFIG_PACKAGE_iptables-mod-tproxy=y
           CONFIG_PACKAGE_iptables-mod-extra=y
           CONFIG_PACKAGE_iptables-mod-ipopt=y
@@ -221,6 +223,19 @@ jobs:
             fi
           done
           [ "$fail" -eq 0 ] || { echo '有必需符号没进 .config，先修配置再编译'; exit 1; }
+
+          # 额外包也必须真的落到 .config 里 —— 否则包名写错（比如 mtr 是 PROVIDES 别名、
+          # luci-i18n-* 是 HIDDEN 包）会一声不吭地丢包，编译成功但镜像里没有
+          echo '--- 额外包自检 ---'
+          for p in $EXTRA_PKGS; do
+            if grep -qE "^(CONFIG_PACKAGE_${p}=[ym]|CONFIG_PACKAGE_${p}=y)" .config; then
+              echo "OK   $p"
+            else
+              echo "::error::额外包 $p 没有进 .config（包名可能不存在，或被 defconfig 丢弃）"
+              fail=1
+            fi
+          done
+          [ "$fail" -eq 0 ] || { echo '额外包校验失败，先修包名再编译'; exit 1; }
 
           echo '--- 设备 profile ---'
           grep -E '^CONFIG_TARGET_ramips_mt76x8_DEVICE' .config
@@ -288,7 +303,7 @@ jobs:
           sha256sum "$IMG"
 
           echo '===== manifest 关键行 ====='
-          grep -E '^kmod-rkp-ipid|^ua3f-bin|^iptables |^ipset ' bin/targets/"$TARGET"/*.manifest || true
+          grep -E '^kmod-rkp-ipid|^ua3f-bin|^iptables|^ipset|^tcpdump|^iperf3|^mtr|^luci-i18n' bin/targets/"$TARGET"/*.manifest || true
 
       - name: 上传固件
         uses: actions/upload-artifact@v4
@@ -302,6 +317,8 @@ jobs:
             openwrt-src/build.log
           if-no-files-found: error
           retention-days: 30
+          # v4.4 起隐藏文件默认不上传，.config 会被漏掉（本次就漏了），必须显式打开
+          include-hidden-files: true
 
       - name: 保存下载缓存
         if: always()
