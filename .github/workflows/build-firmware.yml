@@ -152,7 +152,9 @@ jobs:
 
       - name: 生成 .config
         env:
-          EXTRA_PKGS: ${{ github.event.inputs.extra_packages }}
+          # push 触发时 github.event.inputs.* 是空的，必须带兜底默认值，
+          # 否则中文界面 / tcpdump / iperf3 / mtr 会静默丢掉（第一次构建就踩了这个坑）
+          EXTRA_PKGS: ${{ github.event.inputs.extra_packages || 'luci-i18n-base-zh-cn luci-i18n-firewall-zh-cn luci-i18n-package-manager-zh-cn tcpdump iperf3 mtr' }}
           REMOVE_PKGS: ${{ github.event.inputs.remove_packages }}
         run: |
           set -euo pipefail
