@@ -96,6 +96,17 @@ jobs:
             echo "dl 缓存条目: $(ls dl | wc -l) 个"
           fi
 
+      # 工具链 + staging_dir 缓存：这一坨是首编里最贵的 20-25 分钟（build MIPS 交叉 gcc）
+      # 命中后 make 只需重编受 .config 影响的包，整轮能从 ~70 分钟压到 15 分钟级
+      - name: 恢复工具链缓存 (staging_dir)
+        id: stage-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.SRC }}/staging_dir
+          key: ow-stage-24.10.8-${{ github.run_id }}
+          restore-keys: |
+            ow-stage-24.10.8-
+
       - name: feeds update + install
         run: |
           set -euo pipefail
@@ -305,3 +316,10 @@ jobs:
         with:
           path: ${{ env.DL_CACHE }}
           key: ow-dl-${{ env.OW_VER }}-${{ github.run_id }}
+
+      - name: 提交工具链缓存
+        if: always() && steps.stage-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.SRC }}/staging_dir
+          key: ow-stage-${{ env.OW_VER }}-${{ github.run_id }}
