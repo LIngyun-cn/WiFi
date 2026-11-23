@@ -1,0 +1,111 @@
+name: build-openwrt-firmware
+
+on:
+  workflow_dispatch:
+    inputs:
+      extra_packages:
+        description: '额外装进固件的软件包(空格分隔)'
+        required: false
+        default: 'luci-i18n-base-zh-cn luci-i18n-firewall-zh-cn luci-i18n-package-manager-zh-cn tcpdump iperf3 mtr'
+      remove_packages:
+        description: '从默认列表里去掉的包(空格分隔, 可空)'
+        required: false
+        default: ''
+
+env:
+  OW_VER: '24.10.8'
+  TARGET: 'ramips/mt76x8'
+  PROFILE: 'xiaomi_miwifi-3a'
+  CACHE: '/home/runner/ow-cache'
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore SDK/ImageBuilder cache
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/ow-cache
+          key: ow-${{ env.OW_VER }}-${{ env.TARGET }}-v1
+
+      - name: Download SDK + ImageBuilder
+        run: |
+          set -euo pipefail
+          mkdir -p "$CACHE"
+          BASE="https://downloads.openwrt.org/releases/${OW_VER}/targets/${TARGET}"
+          ls -la "$CACHE" || true
+          if [ -z "$(ls "$CACHE"/openwrt-sdk-*.tar.zst 2>/dev/null)" ]; then
+            SDK=$(curl -fsSL "$BASE/" | grep -o 'openwrt-sdk-[^"]*Linux-x86_64\.tar\.zst' | head -1)
+            echo "SDK file: $SDK"
+            curl -fsSL -o "$CACHE/$SDK" "$BASE/$SDK"
+          fi
+          if [ -z "$(ls "$CACHE"/openwrt-imagebuilder-*.tar.zst 2>/dev/null)" ]; then
+            IB=$(curl -fsSL "$BASE/" | grep -o 'openwrt-imagebuilder-[^"]*Linux-x86_64\.tar\.zst' | head -1)
+            echo "IB file: $IB"
+            curl -fsSL -o "$CACHE/$IB" "$BASE/$IB"
+          fi
+          ls -lh "$CACHE"
+
+      - name: Build local packages (packages/ dir)
+        if: hashFiles('packages/**') != ''
+        run: |
+          set -euo pipefail
+          tar --zstd -xf "$CACHE"/openwrt-sdk-*.tar.zst
+          SDK_DIR=$(echo openwrt-sdk-*/ | head -1)
+          cd "$SDK_DIR"
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          cp -r "$GITHUB_WORKSPACE"/packages/* package/
+          make defconfig
+          for d in "$GITHUB_WORKSPACE"/packages/*/; do
+            name=$(basename "$d")
+            echo "CONFIG_PACKAGE_${name}=m" >> .config
+          done
+          make -j"$(nproc)" V=s
+          echo "=== built ipk ==="
+          find bin/packages -name '*.ipk' -print
+
+      - name: Build firmware image
+        run: |
+          set -euo pipefail
+          tar --zstd -xf "$CACHE"/openwrt-imagebuilder-*.tar.zst
+          IB_DIR=$(echo openwrt-imagebuilder-*/ | head -1)
+          cd "$IB_DIR"
+
+          # 把上一步编出来的本地包塞进 ImageBuilder
+          if ls "$GITHUB_WORKSPACE"/openwrt-sdk-*/bin/packages >/dev/null 2>&1; then
+            find "$GITHUB_WORKSPACE"/openwrt-sdk-*/bin/packages -name '*.ipk' -exec cp -v {} packages/ \;
+          fi
+
+          PKGS="luci ${{ github.event.inputs.extra_packages }}"
+          REMOVES=""
+          for p in ${{ github.event.inputs.remove_packages }}; do
+            REMOVES="$REMOVES -$p"
+          done
+          echo "PACKAGES=$PKGS"
+          echo "REMOVES=$REMOVES"
+
+          FILES_ARG=""
+          [ -d "$GITHUB_WORKSPACE/files" ] && FILES_ARG="FILES=$GITHUB_WORKSPACE/files"
+
+          # ImageBuilder 里 "-pkg" 表示从默认列表剔除
+          make image PROFILE="$PROFILE" PACKAGES="$PKGS $REMOVES" $FILES_ARG
+
+          echo "=== result ==="
+          ls -l bin/targets/"$TARGET"/*.bin
+          sha256sum bin/targets/"$TARGET"/*sysupgrade.bin
+          SIZE=$(stat -c%s bin/targets/"$TARGET"/*squashfs-sysupgrade.bin)
+          echo "image bytes: $SIZE (limit 16777216)"
+          python3 -c "import sys; s=$SIZE; print(f'{s/1048576:.2f} MiB of 16.00 MiB')"
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-${{ env.OW_VER }}-${{ env.PROFILE }}-${{ github.run_number }}
+          path: |
+            openwrt-imagebuilder-*/bin/targets/**/*.bin
+            openwrt-imagebuilder-*/bin/targets/**/sha256sums
+          if-no-files-found: error
+          retention-days: 30

@@ -1,0 +1,44 @@
+# 你自己的包模板 —— 复制成 packages/<包名>/Makefile
+#
+# 关键：目录名 packages/<包名>/ 必须与 PKG_NAME 一致，
+# 因为 workflow 会按目录名追加 CONFIG_PACKAGE_<目录名>=m。
+
+include $(TOPDIR)/rules.mk
+
+PKG_NAME:=mypkg
+PKG_VERSION:=1.0
+PKG_RELEASE:=1
+
+PKG_LICENSE:=MIT
+PKG_MAINTAINER:=me <me@example.com>
+
+include $(INCLUDE_DIR)/package.mk
+
+define Package/$(PKG_NAME)
+  SECTION:=utils
+  CATEGORY:=Utilities
+  TITLE:=My package
+  DEPENDS:=+libc
+endef
+
+define Package/$(PKG_NAME)/description
+  一句话说明这个包干什么。
+endef
+
+define Build/Prepare
+	mkdir -p $(PKG_BUILD_DIR)
+	$(CP) ./src/* $(PKG_BUILD_DIR)/
+endef
+
+define Build/Compile
+	$(MAKE) -C $(PKG_BUILD_DIR) \
+		CC="$(TARGET_CC)" \
+		CFLAGS="$(TARGET_CFLAGS)"
+endef
+
+define Package/$(PKG_NAME)/install
+	$(INSTALL_DIR) $(1)/usr/bin
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/mypkg $(1)/usr/bin/mypkg
+endef
+
+$(eval $(call BuildPackage,$(PKG_NAME)))

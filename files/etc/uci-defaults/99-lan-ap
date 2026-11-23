@@ -1,0 +1,14 @@
+# 首次启动执行一次：语言、无线、SSH 密码（示例，改成你自己的）
+uci -q set luci.main.lang=zh_cn
+
+uci -q delete wireless.radio0.disabled
+uci -q delete wireless.radio1.disabled
+uci -q set wireless.default_radio0.ssid='Ciallo'
+uci -q set wireless.default_radio1.ssid='Ciallo'
+
+uci commit
+
+# 改 root 密码（明文只在这台设备首次启动时用到一次，脚本执行后会被删）
+# echo -e 'yourpassword\nyourpassword' | passwd root
+
+exit 0
