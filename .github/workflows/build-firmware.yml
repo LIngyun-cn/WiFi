@@ -1,4 +1,4 @@
-﻿name: build-firmware
+name: build-firmware
 
 # 小米路由器 3A (ramips/mt76x8) / OpenWrt 24.10.8
 #
@@ -96,16 +96,35 @@ jobs:
             echo "dl 缓存条目: $(ls dl | wc -l) 个"
           fi
 
-      # 工具链 + staging_dir 缓存：这一坨是首编里最贵的 20-25 分钟（build MIPS 交叉 gcc）
-      # 命中后 make 只需重编受 .config 影响的包，整轮能从 ~70 分钟压到 15 分钟级
-      - name: 恢复工具链缓存 (staging_dir)
-        id: stage-cache
+      # 编译缓存：staging_dir 与 build_dir 必须成对，缺一不可。
+      # 事故记录（run 45193093967，21 分钟白跑）：只缓存 staging_dir 时，恢复后
+      # staging_dir/host 里躺着装好的交叉工具链，但 build_dir 是空的 —— 没有 .built 时间戳、
+      # 没有中间对象。于是 make 一边认为工具链该重编，一边在一个已被污染的 staging_dir 上重编，
+      # 直接 `ERROR: toolchain/binutils failed to build.`。两者同源同 key 保存才不会错配。
+      - name: 恢复编译缓存 (staging_dir + build_dir)
+        id: full-cache
         uses: actions/cache/restore@v4
         with:
-          path: ${{ env.SRC }}/staging_dir
-          key: ow-stage-24.10.8-${{ github.run_id }}
+          path: |
+            ${{ env.SRC }}/staging_dir
+            ${{ env.SRC }}/build_dir
+          key: ow-full-${{ env.OW_VER }}-${{ github.run_id }}
           restore-keys: |
-            ow-stage-24.10.8-
+            ow-full-${{ env.OW_VER }}-
+
+      - name: 缓存一致性检查
+        if: steps.full-cache.outputs.cache-hit == 'true'
+        run: |
+          set -euo pipefail
+          cd "$SRC"
+          if ! ls -d build_dir/target-* >/dev/null 2>&1; then
+            echo "::warning::命中的缓存缺少 build_dir/target-*，为避免污染当前 staging_dir，整对丢弃"
+            rm -rf staging_dir build_dir
+          else
+            echo "缓存一致，build_dir:"
+            ls -d build_dir/target-*
+            du -sh staging_dir build_dir || true
+          fi
 
       - name: feeds update + install
         run: |
@@ -334,9 +353,11 @@ jobs:
           path: ${{ env.DL_CACHE }}
           key: ow-dl-${{ env.OW_VER }}-${{ github.run_id }}
 
-      - name: 提交工具链缓存
-        if: always() && steps.stage-cache.outputs.cache-hit != 'true'
+      - name: 提交编译缓存
+        if: success() && steps.full-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
-          path: ${{ env.SRC }}/staging_dir
-          key: ow-stage-${{ env.OW_VER }}-${{ github.run_id }}
+          path: |
+            ${{ env.SRC }}/staging_dir
+            ${{ env.SRC }}/build_dir
+          key: ow-full-${{ env.OW_VER }}-${{ github.run_id }}
