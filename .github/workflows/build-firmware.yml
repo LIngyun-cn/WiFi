@@ -1,4 +1,4 @@
-name: build-firmware
+﻿name: build-firmware
 
 # 小米路由器 3A (ramips/mt76x8) / OpenWrt 24.10.8
 #
@@ -39,7 +39,7 @@ permissions:
 
 concurrency:
   group: build-firmware-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 env:
   OW_VER: '24.10.8'
