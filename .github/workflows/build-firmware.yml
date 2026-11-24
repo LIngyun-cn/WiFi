@@ -329,6 +329,14 @@ jobs:
         run: |
           set -o pipefail
           cd "$SRC"
+          # 冷编译（没恢复 staging_dir/build_dir）时内核还没准备，内核模块此刻根本编不了：
+          #   make[2]: *** No rule to make target '.../linux-6.6.144/.config'
+          # 这一步只在工具链与内核已经存在时才有意义（即命中了编译缓存），
+          # 否则直接放过，交给完整编译（run #32 就是这么误杀自己的）。
+          if ! ls -d build_dir/target-*/linux-*/linux-* >/dev/null 2>&1; then
+            echo "冷编译：内核尚未准备，跳过模块预编译，交给完整编译"
+            exit 0
+          fi
           for p in package/rkp-ipid package/tcpts-strip; do
             echo "=== $p ==="
             if ! make "$p/compile" V=s 2>&1 | tail -n 80 | tee "/tmp/$(basename "$p").log"; then
