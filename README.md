@@ -32,6 +32,10 @@ files/                                 根文件系统覆盖层
   etc/config/{ua2f,ganyu,ybu}          上面三者的配置
   etc/uci-defaults/{90-rkp-ipid,93-ua2f,95-ybu,96-macclone,97-ganyu,98-wan-sta}
   usr/bin/ybu-login                    门户登录脚本本体
+  usr/bin/ganyu-status                 反检测链路状态采集（纯文本，供 LuCI 页面调用）
+  usr/share/luci/menu.d/luci-app-ganyu.json     状态页菜单项（状态 → 反检测状态）
+  usr/share/rpcd/acl.d/luci-app-ganyu.json      ACL：放行 /usr/bin/ganyu-status 的 exec
+  www/luci-static/resources/view/ganyu/status.js  LuCI 视图（5 秒轮询刷新）
   etc/uci-defaults/99-lan-ap           语言 / 无线 / 区域（SSID 只在还是 OpenWrt 默认名时才写）
 ```
 
@@ -94,6 +98,21 @@ UA3F（`SunBK201/UA3F`）是一个 Go 写的 17.6MB 静态二进制。在这台�
 - **flow offloading 必须关**（脚本会自动 `uci set firewall.@defaults[0].flow_offloading=0`），
   否则软件/硬件 NAT 加速让包绕过 `NF_INET_POST_ROUTING`，模块等于没装。
 - 每翻倍打印一次统计：`Successfully modified %u packages ...`，`logread | grep rkp-ipid` 看。
+
+## 反检测状态页
+
+LuCI → **状态 → 反检测状态**（`/cgi-bin/luci/admin/status/ganyu`），5 秒自动刷新，显示：
+
+- IPID：模块是否加载、`IPID_MOD` 是否挂在 OUTPUT/FORWARD、已改写包数
+- nft `table ip ganyu`：DNS 劫持（UDP/TCP）、NTP 归位、TTL 统一、DoT 封锁各自的命中包数
+- flow offloading 当前值（必须是 `0`，否则 rkp-ipid 收不到包）
+- UA2F 进程状态与队列放行包数、ybu-login 的 `enabled`
+- 无线 STA 的 SSID / 信号 / 信道 / 信号质量，WAN 拿到的地址
+- 最近 5 条相关日志
+
+实现是「`/usr/bin/ganyu-status` 出纯文本 + LuCI 视图原样显示」，所以命令行随时可以
+`ssh root@192.168.1.1 ganyu-status` 看同一份数据。数据全取自 `iptables -L -v` / `nft list`，
+**全是计数器，看一眼就是证据**，不需要信任任何中间层。
 
 ## 已知限制
 

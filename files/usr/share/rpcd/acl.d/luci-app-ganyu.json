@@ -1,0 +1,13 @@
+{
+	"luci-app-ganyu": {
+		"description": "Grant read access to the ganyu anti-detection status page",
+		"read": {
+			"file": {
+				"/usr/bin/ganyu-status": [ "exec" ]
+			},
+			"ubus": {
+				"file": [ "exec" ]
+			}
+		}
+	}
+}

@@ -1,0 +1,14 @@
+{
+	"admin/status/ganyu": {
+		"title": "反检测状态",
+		"order": 15,
+		"action": {
+			"type": "view",
+			"path": "ganyu/status"
+		},
+		"depends": {
+			"acl": [ "luci-app-ganyu" ],
+			"fs": { "/usr/bin/ganyu-status": "executable" }
+		}
+	}
+}

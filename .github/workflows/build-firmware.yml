@@ -161,6 +161,7 @@ jobs:
           find "$GITHUB_WORKSPACE/files" -type f -name '*.sh' -exec chmod 755 {} + 2>/dev/null || true
           chmod 755 "$GITHUB_WORKSPACE"/files/etc/init.d/* 2>/dev/null || true
           chmod 755 "$GITHUB_WORKSPACE"/files/etc/uci-defaults/* 2>/dev/null || true
+          chmod 755 "$GITHUB_WORKSPACE"/files/usr/bin/* 2>/dev/null || true
           mkdir -p files
           cp -r "$GITHUB_WORKSPACE/files/." files/
           find files -type f -exec ls -l {} \;
@@ -296,7 +297,11 @@ jobs:
           for f in usr/bin/ua2f etc/init.d/ua2f etc/config/ua2f etc/uci-defaults/93-ua2f \
                    etc/init.d/rkp-ipid-mark etc/uci-defaults/90-rkp-ipid \
                    usr/bin/ybu-login etc/init.d/ybu-login etc/config/ybu etc/uci-defaults/95-ybu etc/uci-defaults/96-macclone \
-                   etc/init.d/ganyu-guard etc/config/ganyu etc/uci-defaults/97-ganyu etc/uci-defaults/98-wan-sta; do
+                   etc/init.d/ganyu-guard etc/config/ganyu etc/uci-defaults/97-ganyu etc/uci-defaults/98-wan-sta \
+                   usr/bin/ganyu-status \
+                   usr/share/luci/menu.d/luci-app-ganyu.json \
+                   usr/share/rpcd/acl.d/luci-app-ganyu.json \
+                   www/luci-static/resources/view/ganyu/status.js; do
             if [ -e "$ROOT/$f" ]; then
               echo "OK   /$f"
             else
@@ -305,9 +310,18 @@ jobs:
             fi
           done
           test -x "$ROOT/etc/init.d/rkp-ipid-mark" || { echo 'init.d/rkp-ipid-mark 没有可执行位'; exit 1; }
-          for f in etc/init.d/ganyu-guard etc/init.d/ybu-login usr/bin/ybu-login etc/init.d/ua2f etc/uci-defaults/93-ua2f etc/uci-defaults/98-wan-sta; do
+          for f in etc/init.d/ganyu-guard etc/init.d/ybu-login usr/bin/ybu-login etc/init.d/ua2f etc/uci-defaults/93-ua2f etc/uci-defaults/98-wan-sta usr/bin/ganyu-status; do
             test -x "$ROOT/$f" || { echo "$f 没有可执行位"; exit 1; }
           done
+
+          # 反检测状态页：菜单项必须指向 ganyu/status，ACL 必须放行 ganyu-status，
+          # 视图文件必须真的在 /www 下（否则 LuCI 打开是空白页）
+          grep -q 'ganyu/status' "$ROOT/usr/share/luci/menu.d/luci-app-ganyu.json" || {
+            echo 'menu.d 里找不到 ganyu/status 路由'; exit 1; }
+          grep -q '/usr/bin/ganyu-status' "$ROOT/usr/share/rpcd/acl.d/luci-app-ganyu.json" || {
+            echo 'ACL 里没有放行 ganyu-status 的 exec 权限'; exit 1; }
+          grep -q 'ganyu-status' "$ROOT/www/luci-static/resources/view/ganyu/status.js" || {
+            echo 'LuCI 视图没有调用 /usr/bin/ganyu-status'; exit 1; }
 
           # 三个断言：ua2f 用的是我们改过的配置（不是包自带默认）、init 走的是 NFQUEUE 而不是 iptables 老路、
           # 而且 ua3f 那种"装了但跑不动"的包这次真的不该再出现在镜像里
