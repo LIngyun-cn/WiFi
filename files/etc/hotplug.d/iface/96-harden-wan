@@ -1,0 +1,47 @@
+#!/bin/sh
+# WAN 口起来时把"路由器身份"相关的内核开关关掉。
+#
+# 为什么单独一个 hotplug 脚本：这些开关是 per-interface 的，必须等
+# 真正的 WAN 设备出现才知道要关哪个（dsa 时是 eth0.1，走无线 STA 时
+# 是 phy1-sta0）。init 脚本启动时 WAN 还没 up，拿不到设备名。
+#
+# 关的是什么、为什么：
+#
+# 1) net.ipv6.conf.<wan>.forwarding=0
+#    内核在"允许转发"的接口上会加入 ff02::2（All-Routers 组播），并向
+#    交换机发 MLD Report。校园网只要抓到一个 ff02::2 的 MLD 报告，就
+#    知道"这条链路上的这台机器是路由器"——这跟流量指纹无关，是链路层
+#    的自曝。Windows / 手机不开 IPv6 转发，永远不会加这个组。
+#    （实测：关掉后 `ip -6 maddr show dev phy1-sta0` 里的 ff02::2 消失）
+#
+# 2) net.ipv6.conf.<wan>.autoconf=0
+#    不开 SLAAC。校园网真给了 RA+前缀时，我们也不想在 WAN 侧长出全局
+#    地址（那样 IPv6 会绕过 v4 的所有改写直接出网）。
+#
+# 3) net.ipv4.conf.<wan>.send_redirects=0
+#    开了它，一旦有包需要从 WAN 口再转发回 WAN 网段，内核会发 ICMP
+#    type 5（Redirect）给校园网里的机器——那是路由器的典型行为。
+#
+# 4) net.ipv4.conf.<wan>.accept_source_route=0
+#    不接受源路由选项，顺手的卫生项。
+#
+# 这四条都不影响我们的功能：IPv6 转发本来就整条 DROP（block_ipv6），
+# DHCPv6 客户端本来也是 down 的。
+
+[ "$ACTION" = "ifup" ] || exit 0
+[ "$INTERFACE" = "wan" ] || exit 0
+[ -n "$DEVICE" ] || exit 0
+[ -d "/proc/sys/net/ipv6/conf/$DEVICE" ] || exit 0
+
+logger -t harden-wan "WAN 口 $DEVICE 起来，关掉转发/重定向/SLAAC 这些自曝开关"
+
+for k in forwarding accept_ra autoconf; do
+	f="/proc/sys/net/ipv6/conf/$DEVICE/$k"
+	[ -w "$f" ] && echo 0 > "$f"
+done
+for k in send_redirects accept_source_route; do
+	f="/proc/sys/net/ipv4/conf/$DEVICE/$k"
+	[ -w "$f" ] && echo 0 > "$f"
+done
+
+exit 0

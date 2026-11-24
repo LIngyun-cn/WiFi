@@ -205,6 +205,33 @@ ensure_canary() {
 	log "canary: use-application-dns.net -> NXDOMAIN（Firefox 自动关 DoH）"
 }
 
+# WAN 口上"别当路由器"的内核开关。
+#
+# 内核在允许转发的接口上会加入 ff02::2（All-Routers 组播）并发 MLD Report
+# —— 校园网抓到一个 ff02::2 的 MLD 报告就知道这条链路有台路由器，这是
+# 链路层自曝，跟流量指纹无关。send_redirects 开着则会朝校园网段发
+# ICMP type 5（Redirect），也是路由器行为。
+# 正常开机由 hotplug（/etc/hotplug.d/iface/96-harden-wan）兜，这里再补一次
+# ——因为 restart ganyu-guard 时 WAN 早就 up 了，不会再有 ifup 事件。
+harden_wan() {
+	local dev
+	dev=$(ubus -S call network.interface.wan status 2>/dev/null |
+		jsonfilter -e '@.l3_device' 2>/dev/null)
+	[ -n "$dev" ] || dev=$(uci -q get network.wan.device)
+	[ -n "$dev" ] || return 0
+	[ -d "/proc/sys/net/ipv6/conf/$dev" ] || return 0
+
+	for k in forwarding accept_ra autoconf; do
+		f="/proc/sys/net/ipv6/conf/$dev/$k"
+		[ -w "$f" ] && echo 0 > "$f"
+	done
+	for k in send_redirects accept_source_route; do
+		f="/proc/sys/net/ipv4/conf/$dev/$k"
+		[ -w "$f" ] && echo 0 > "$f"
+	done
+	log "harden_wan: $dev 已关掉 v6 转发/重定向/SLAAC（不再 join ff02::2）"
+}
+
 start() {
 	if [ "$(c enabled)" != "1" ]; then
 		rules_down
@@ -212,6 +239,7 @@ start() {
 		return 0
 	fi
 	rules_up
+	harden_wan
 	ensure_ntpserver
 	ensure_canary
 }
