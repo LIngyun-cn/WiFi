@@ -1,13 +1,35 @@
 #!/bin/sh
-# 把 WAN 改成"无线 STA 连校园网"，取代 eth0.1 有线口。
+# WAN 接入方式选择：有线（eth0.1 插墙口）还是无线 STA（radio1 连校园网 YBU）。
+#
+# 用 uci 里的 ybu.main.wan_mode 控制，默认 sta：
+#   sta   —— 关掉有线口，用 phy1 的 STA 连 YBU，WAN 走无线
+#   wired —— 关掉 STA，WAN 回到 eth0.1 走有线 DHCP
 #
 # 3A 的 phy1（MT76x2E，5G）同时跑 AP 和 STA 时受 #channels <= 1 限制，
-# 必须同一个信道，所以 radio1 的 channel 要设成 auto 让 hostapd 跟随 STA。
+# 必须同一个信道，所以 sta 模式下 radio1 的 channel 要设成 auto 让 hostapd 跟随 STA。
 #
-# 只在还没有 wan_sta 时创建，避免覆盖用户自己改过的 SSID。
+# 运行时切换用 `ybu-login mode sta|wired`，改完 reboot 生效
+# （别用 wifi reload —— 这台 57MB 内存的机器 reload 会同时起两套 wpa_supplicant 直接 OOM）。
 
 [ -f /etc/config/wireless ] || exit 0
 
+mode=$(uci -q get ybu.main.wan_mode)
+[ -n "$mode" ] || mode='sta'
+
+if [ "$mode" = "wired" ]; then
+	# 有线模式：WAN 绑定 eth0.1，STA 停用（两个 WAN 同时起来会抢默认路由）
+	uci -q set network.wan.device='eth0.1'
+	uci -q set network.wan.proto='dhcp'
+	uci -q commit network
+	if uci -q get wireless.wan_sta >/dev/null 2>&1; then
+		uci -q set wireless.wan_sta.disabled='1'
+		uci -q commit wireless
+	fi
+	logger -t wan-sta "WAN 模式 = wired（eth0.1 有线 DHCP，STA 已停用）"
+	exit 0
+fi
+
+# ---- sta 模式 ----
 if ! uci -q get wireless.wan_sta >/dev/null 2>&1; then
 	uci set wireless.wan_sta=wifi-iface
 	uci set wireless.wan_sta.device='radio1'

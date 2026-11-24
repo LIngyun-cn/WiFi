@@ -11,6 +11,9 @@ config main 'main'
 	# 在线探针：正常时返回空体最理想（generate_204 这一类）。
 	# 别用带大量正文的地址当探针 —— 正文里的 login/认证 字样会让"已联网"被误判成"要登录"。
 	option probe_url 'http://www.gstatic.com/generate_204'
+	# WAN 接入方式：sta = radio1 无线连校园网 YBU；wired = 网线插墙口走 eth0.1
+	# 切换用 ybu-login mode sta|wired，改完 reboot 生效
+	option wan_mode 'sta'
 	# 探测用的出口接口（wan / wwan / 你自建的 interface 名）
 	option interface 'wan'
 	option interval '60'

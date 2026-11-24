@@ -173,9 +173,11 @@ show_mac() {
 }
 
 status() {
-	local ip st
+	local ip st md
 	ip=$(wan_ip)
+	md=$(c wan_mode); [ -n "$md" ] || md=sta
 	echo "接口   : $(c interface)"
+	echo "模式   : ${md}（WAN 接入方式：sta=无线连校园网 / wired=网线插墙口）"
 	echo "WAN IP : ${ip:-<无>}"
 	echo "账号   : $(c account)"
 	echo "门户   : $(c portal)"
@@ -186,6 +188,41 @@ status() {
 		1) echo "在线   : 否（探针被门户劫持，需要登录）" ;;
 		*) echo "在线   : 未知（探测请求发不出去，检查 WAN）" ;;
 	esac
+}
+
+# ---------- 切换 WAN 接入方式 ----------
+# 有线接入时校园网看到的是 eth0.1 的 MAC（这台机器上 = 50:64:2b:c1:00:55），
+# 和 STA 的 52:64:2b:c1:00:57 不是同一个 —— 所以切过去等于"新设备"，门户要重新认证一次，
+# daemon 会自动做（它按 l3_device 的真实 MAC 取参数）。
+set_mode() {
+	case "$1" in
+	sta)
+		uci -q delete network.wan.device
+		uci -q set network.wan.proto='dhcp'
+		if uci -q get wireless.wan_sta >/dev/null 2>&1; then
+			uci -q set wireless.wan_sta.disabled='0'
+		fi
+		uci -q set ybu.main.wan_mode='sta'
+		log "WAN 模式切到 sta（radio1 连 YBU）"
+		;;
+	wired)
+		uci -q set network.wan.device='eth0.1'
+		uci -q set network.wan.proto='dhcp'
+		if uci -q get wireless.wan_sta >/dev/null 2>&1; then
+			uci -q set wireless.wan_sta.disabled='1'
+		fi
+		uci -q set ybu.main.wan_mode='wired'
+		log "WAN 模式切到 wired（eth0.1 网线 DHCP）"
+		;;
+	*)
+		echo "用法: $0 mode sta|wired" >&2
+		return 1
+		;;
+	esac
+	uci -q commit network
+	uci -q commit wireless
+	uci -q commit ybu
+	echo "已切换，reboot 后生效（别用 wifi reload —— 这台机器 reload 会 OOM）"
 }
 
 daemon() {
@@ -212,7 +249,8 @@ case "$1" in
 	status) status ;;
 	url)    build_url ;;
 	mac)    show_mac ;;
+	mode)   set_mode "$2" ;;
 	b64)    b64 "$2"; exit $? ;;          # 自测用
 	daemon|"") daemon ;;
-	*) echo "用法: $0 {daemon|login|check|status|url|mac|b64}" >&2; exit 1 ;;
+	*) echo "用法: $0 {daemon|login|check|status|url|mac|mode|b64}" >&2; exit 1 ;;
 esac
