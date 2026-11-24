@@ -73,17 +73,21 @@ EOF
 
 # ---------- 在线探测 ----------
 # 返回 0=在线 1=需登录（探针被劫持） 2=探测不通（没路由/门户不通）
+# 探针优先用 generate_204 这类"正常时返回空体"的地址：空体 = 在线，最不容易误判。
+# 关键词里刻意不含 login / 认证 —— 这两个词在正常网页里到处都是（百度首页就命中），
+# 拿它们判"被劫持"会把已联网误判成离线，然后 daemon 反复去登录（门户回 ret_code 2）。
 online() {
 	local url body rc
 	url=$(c probe_url)
-	[ -n "$url" ] || url='http://connect.rom.miui.com/generate_204'
+	[ -n "$url" ] || url='http://www.gstatic.com/generate_204'
 	body=$(uclient-fetch -q -O - -T 8 "$url" 2>/dev/null)
 	rc=$?
 	# 连不上 → 不是"在线"，也不算被劫持
 	[ "$rc" -ne 0 ] && return 2
 	# 204 探针正常时 body 为空
 	[ -z "$body" ] && return 0
-	echo "$body" | grep -qiE 'eportal|portal\.htm|login|NextURL|锐捷|认证' && return 1
+	# 只有明确的锐捷门户特征才算"要登录"
+	echo "$body" | grep -qiE 'eportal|nexturl|srun_portal|10\.10\.252\.1' && return 1
 	return 0
 }
 
