@@ -16,3 +16,8 @@ config main 'main'
 	option ttl_unify '1'
 	# 1 = Flash/AC 注入特征拦截（需要 iptables-mod-filter，默认关）
 	option ac_probe '0'
+	# 1 = 禁止 IPv6 转发（默认开）。理由：rkp-ipid / ttl 统一 / ua2f 全是 v4-only，
+	#     而 IPv6 走 SLAAC 时每台设备一个全局地址、不需要 NAT，网关按源地址就能
+	#     逐台识别（EUI-64 里还带 MAC）。实测目前校园网没有 v6 出口，这条现在
+	#     零代价；哪天学校开了 v6，它保证不会静默泄漏成"三台机器各自上网"。
+	option block_ipv6 '1'

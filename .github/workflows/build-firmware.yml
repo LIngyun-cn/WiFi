@@ -145,6 +145,11 @@ jobs:
           cp -r "$GITHUB_WORKSPACE/packages/rkp-ipid/." package/rkp-ipid/
           echo "[rkp-ipid] $(ls package/rkp-ipid)"
 
+          # ---- 1b. tcpts-strip (kmod, 抹掉出网 SYN 里的 TCP 时间戳选项) ----
+          mkdir -p package/tcpts-strip
+          cp -r "$GITHUB_WORKSPACE/packages/tcpts-strip/." package/tcpts-strip/
+          echo "[tcpts-strip] $(ls package/tcpts-strip) / src: $(ls package/tcpts-strip/src)"
+
           # ---- 2. ua2f (C 实现，源码 vendor 在 package-src/ua2f/src.tar.gz) ----
           # ua3f 那个 17.6MB 的 Go 二进制在这颗 MT7628 上启动即卡死（A/B 实测 CPU 100%、
           # 进程 D 状态、规则都没建），已经整包移出构建，只保留 UA2F。
@@ -190,6 +195,7 @@ jobs:
           # luci-i18n-*-zh-cn 是 HIDDEN 包，必须用 LUCI_LANG 开关带出来
           CONFIG_LUCI_LANG_zh_Hans=y
           CONFIG_PACKAGE_kmod-rkp-ipid=y
+          CONFIG_PACKAGE_kmod-tcpts-strip=y
           # ua3f 已移出构建（Go 二进制在这颗 CPU 上跑不起来），改用 C 实现的 ua2f
           CONFIG_PACKAGE_ua2f=y
           CONFIG_PACKAGE_libnetfilter-queue=y
@@ -244,6 +250,7 @@ jobs:
           fail=0
           for s in \
             CONFIG_PACKAGE_kmod-rkp-ipid \
+            CONFIG_PACKAGE_kmod-tcpts-strip \
             CONFIG_PACKAGE_ua2f \
             CONFIG_PACKAGE_kmod-nft-queue \
             CONFIG_PACKAGE_libnetfilter-queue \
@@ -356,6 +363,14 @@ jobs:
           ls -l "$KO"
           strings "$KO" | grep -i '^vermagic=' || true
 
+          KOTS=$(find build_dir -name 'tcpts-strip.ko' -type f 2>/dev/null | sed -n '1p' || true)
+          if [ -z "${KOTS:-}" ]; then
+            echo 'tcpts-strip.ko 没生成'
+            exit 1
+          fi
+          ls -l "$KOTS"
+          strings "$KOTS" | grep -i '^vermagic=' || true
+
           echo '===== 根文件系统内容抽查 ====='
           ROOT=$(find build_dir -maxdepth 2 -type d -name 'root-ramips' 2>/dev/null | head -1 || true)
           if [ -z "${ROOT:-}" ]; then
@@ -379,6 +394,9 @@ jobs:
             fi
           done
           test -x "$ROOT/etc/init.d/rkp-ipid-mark" || { echo 'init.d/rkp-ipid-mark 没有可执行位'; exit 1; }
+          # 两个自编内核模块必须落进 /lib/modules
+          ls "$ROOT/lib/modules/6.6.144/rkp-ipid.ko" >/dev/null 2>&1 || { echo 'rootfs 里没有 rkp-ipid.ko'; exit 1; }
+          ls "$ROOT/lib/modules/6.6.144/tcpts-strip.ko" >/dev/null 2>&1 || { echo 'rootfs 里没有 tcpts-strip.ko'; exit 1; }
           for f in etc/init.d/ganyu-guard etc/init.d/ybu-login usr/bin/ybu-login etc/init.d/ua2f etc/uci-defaults/93-ua2f etc/uci-defaults/98-wan-sta usr/bin/ganyu-status etc/uci-defaults/94-bbr etc/uci-defaults/92-packfix; do
             test -x "$ROOT/$f" || { echo "$f 没有可执行位"; exit 1; }
           done
@@ -413,6 +431,11 @@ jobs:
           fi
           grep -q 'queue num 10010' "$ROOT/etc/init.d/ua2f" || {
             echo 'init.d/ua2f 里找不到 NFQUEUE 规则'; exit 1; }
+          # IPv6 兜底：v4-only 的三件套挡不住 SLAAC 的全局地址，必须真封 v6 转发
+          grep -q 'block_ipv6' "$ROOT/etc/init.d/ganyu-guard" || {
+            echo '::error::ganyu-guard 里没有 block_ipv6，IPv6 会绕开整套伪装'; exit 1; }
+          grep -q "option block_ipv6" "$ROOT/etc/config/ganyu" || {
+            echo '::error::/etc/config/ganyu 缺少 block_ipv6 开关'; exit 1; }
           if [ -e "$ROOT/usr/bin/ua3f" ]; then
             echo '::error::ua3f 仍然被打进镜像了，检查 CONFIG_PACKAGE_ua3f-bin 是否已移出 .config'
             exit 1
@@ -431,7 +454,7 @@ jobs:
           sha256sum "$IMG"
 
           echo '===== manifest 关键行 ====='
-          grep -E '^ua2f|^libnetfilter|^kmod-nft-queue|^libmnl|^kmod-rkp-ipid|^iptables|^tcpdump|^iperf3|^mtr|^luci-i18n' bin/targets/"$TARGET"/*.manifest || true
+          grep -E '^ua2f|^libnetfilter|^kmod-nft-queue|^libmnl|^kmod-rkp-ipid|^kmod-tcpts-strip|^iptables|^tcpdump|^iperf3|^mtr|^luci-i18n' bin/targets/"$TARGET"/*.manifest || true
 
       - name: 失败时也上传镜像（供排查）
         if: failure()

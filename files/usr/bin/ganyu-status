@@ -98,6 +98,18 @@ ybu_state() {
 	echo "enabled=$e"
 }
 
+# IPv6 转发封锁状态（v6 走 SLAAC 每台设备一个全局地址，绕开 v4 那套伪装）
+v6_state() {
+	local out
+	if ! nft list table ip6 ganyu >/dev/null 2>&1; then
+		echo '未封锁（ip6 ganyu 表不存在）'
+		return
+	fi
+	out=$(nft list table ip6 ganyu 2>/dev/null | awk '/counter packets/ { n = $3; if (n == "") n = "?"; print n; exit }')
+	[ -n "$out" ] || out='?'
+	echo "转发已 DROP（已拦 $out 包）"
+}
+
 # flow offloading（必须为 0，否则 nat 加速会绕过 POSTROUTING，rkp-ipid 收不到包）
 offload_state() {
 	local a b
@@ -158,6 +170,7 @@ main() {
 	printf 'NTP   强制本地     %s 包 → 本机 ntpd\n' "$(echo "$c" | sed -n 's/^ntp=//p')"
 	printf 'TTL   统一 64      %s 包\n' "$(echo "$c" | sed -n 's/^ttl=//p')"
 	printf 'DoT   853 封锁     %s 包\n' "$(echo "$c" | sed -n 's/^dot=//p')"
+	printf 'IPv6  转发封锁     %s\n' "$(v6_state)"
 	printf '流量卸载 flow offloading  %s（必须 0）\n' "$(offload_state)"
 	echo
 

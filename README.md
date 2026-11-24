@@ -22,12 +22,14 @@
 .github/workflows/build-firmware.yml   全源码构建流程
 packages/rkp-ipid/                     kmod-rkp-ipid 源码（上游 CHN-beta/rkp-ipid @ 073e389）
   Makefile  src/{Makefile,Kconfig,rkp-ipid.c}
+packages/tcpts-strip/                  kmod-tcpts-strip（自写：抹掉出网 SYN 的 TCP 时间戳选项）
+  Makefile  src/{Makefile,Kconfig,tcpts-strip.c}
 package-src/ua2f/{Makefile,src.tar.gz}    UA2F（C 实现）打包元数据 + vendored 源码包
 local-ipk/ua_3.7.0-r1_mipsel_24kc.ipk   UA3F 官方预编译包（已停用，仅留档，不参与构建）
 files/                                 根文件系统覆盖层
   etc/init.d/rkp-ipid-mark             iptables mangle 打 mark + 关 flow offloading
   etc/init.d/ua2f                      上游 v5.2.0 的 init（nft / iptables 双路径）
-  etc/init.d/ganyu-guard               防检测：DNS 劫持 / NTP 归位 / TTL 统一 / DoT 封锁
+  etc/init.d/ganyu-guard               防检测：DNS 劫持 / NTP 归位 / TTL 统一 / DoT 封锁 / IPv6 兜底
   etc/init.d/ybu-login                 校园网锐捷门户自动登录
   etc/config/{ua2f,ganyu,ybu}          上面三者的配置
   etc/uci-defaults/{90-rkp-ipid,93-ua2f,94-bbr,95-ybu,96-macclone,97-ganyu,98-wan-sta}
@@ -101,12 +103,61 @@ UA3F（`SunBK201/UA3F`）是一个 Go 写的 17.6MB 静态二进制。在这台�
   否则软件/硬件 NAT 加速让包绕过 `NF_INET_POST_ROUTING`，模块等于没装。
 - 每翻倍打印一次统计：`Successfully modified %u packages ...`，`logread | grep rkp-ipid` 看。
 
+## TCP 时间戳：为什么必须自己写内核模块
+
+TTL 和 IPID 能改，是因为它们都在 **IP 头**里，路由器本来就在重写。TCP 时间戳在
+**TCP 选项区**（`kind=8, len=10`），由客户端协议栈生成，路由器只转发。
+
+能想到的现成方案全是死的：
+
+| 候选 | 结论 |
+|---|---|
+| `iptables -j TCPOPTSTRIP --strip-options timestamp` | OpenWrt **不构建** xt_TCPOPTSTRIP：`v24.10.8` 的 `include/netfilter.mk` 全文没有它，库里也没有这个包 |
+| `kmod-ipt-extra` | 只含 xt_TCPMSS / xt_HL / xt_TPROXY / xt_string 等 30 个 |
+| nftables | 语法层面无法改 TCP 选项 |
+| `sysctl net.ipv4.tcp_timestamps=0` | 只关路由器自己的包，**转发的流量一个字节都不碰** |
+| 统一 NTP 授时 | **没有用**。TSval 是单调时钟（Linux 走 jiffies、Windows 每 10ms 一跳），跟墙钟无关，NTP 对齐不了它 |
+
+所以自写 `packages/tcpts-strip`：`POST_ROUTING`（`NF_IP_PRI_NAT_SRC`，与 rkp-ipid
+同位置）上解析选项，对 `SYN && !ACK` 的包把 kind=8 那 10 字节就地写成 10 个
+`NOP(0x01)`——**等长替换**，`doff` 不变、payload 不用挪，只需重算 TCP 校验和。
+
+只处理 SYN 的原因：SYN 里没有 ts，对端 SYN-ACK 也不会回 ts，这条连接两个方向
+从此都不带时间戳；反过来在已协商 ts 的连接上单方向剥离，会让 TSecr 对不上、
+打乱对端 PAWS 与 RTT 采样。
+
+代价：失去 PAWS 与时间戳 RTT 采样（宿舍场景无感）。参数
+`/sys/module/tcpts_strip/parameters/strip_syn`（默认 1）。
+
+验证方法：抓 WAN 侧出网 SYN，选项里的 `TS val ...` 应该消失——
+`tcpdump -i phy1-sta0 -c 5 -nn -vv 'tcp[tcpflags] & tcp-syn != 0'`，再看
+`dmesg | grep tcpts-strip` 的 `stripped N SYNs`。
+
+## IPv6：为什么直接封转发，而不是"再做一套 v6 规则"
+
+实测这台路由器在 YBU 校园网上**没有 IPv6 出口**（`phy1-sta0` 只有 `fe80::`、
+无默认路由、`wan6` `up=false`、`ping -6 2400:3200::1` 报 `Network unreachable`），
+所以当下泄漏量为 0。
+
+但 IPv6 的泄漏性质和 v4 完全不同：SLAAC 下每台设备一个全局地址、不经 NAT，
+网关按源地址（EUI-64 里还带 MAC）就能逐台识别，等于"免检通道"——而
+`rkp-ipid` / TTL 统一 / `ua2f` 全是 v4-only，一条都管不到 v6。
+
+所以 `ganyu.main.block_ipv6=1`（默认开）会在 `table ip6 ganyu` 里建一条
+`chain drop6 { type filter hook forward priority filter; }` + `counter drop`，
+**v6 转发全封**：要么全走 v4（受我们控制），要么别走。目前校园网无 v6，代价为零；
+哪天学校开了 v6，这条规则保证不会静默变成"三台机器各自上网"。
+
+> 踩坑：链名不能叫 `fwd`——nft ≥ 1.0.9 把 `fwd` 当语句关键字，会报
+> `syntax error, unexpected fwd, expecting string or last`。
+
 ## 反检测状态页
 
 LuCI → **状态 → 反检测状态**（`/cgi-bin/luci/admin/status/ganyu`），5 秒自动刷新，显示：
 
 - IPID：模块是否加载、`IPID_MOD` 是否挂在 OUTPUT/FORWARD、已改写包数
 - nft `table ip ganyu`：DNS 劫持（UDP/TCP）、NTP 归位、TTL 统一、DoT 封锁各自的命中包数
+- IPv6 转发是否已封（`table ip6 ganyu` 的 drop 计数）
 - flow offloading 当前值（必须是 `0`，否则 rkp-ipid 收不到包）
 - UA2F 进程状态与队列放行包数、ybu-login 的 `enabled`
 - 无线 STA 的 SSID / 信号 / 信道 / 信号质量，WAN 拿到的地址

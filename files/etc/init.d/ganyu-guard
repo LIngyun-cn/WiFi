@@ -25,6 +25,7 @@ EXTRA_HELP="	status	打印 nft 表与命中计数"
 CONF=ganyu
 TABLE=ganyu
 AC_CHAIN=GANYU_AC
+V6_CHAIN=drop6
 
 c() { uci -q get "${CONF}.main.$1"; }
 log() { logger -t ganyu-guard "$*"; }
@@ -70,7 +71,34 @@ rules_up() {
 		log "block_dot: 853/tcp 已封"
 	fi
 
+	v6_rules
 	ac_rules
+}
+
+# IPv6 兜底：本套规则（rkp-ipid / ttl 统一 / ua2f）全是 v4-only，而 v6 在
+# SLAAC 下每台设备一个全局地址、不经 NAT，网关按源地址就能逐台识别，
+# 等于"检测免检通道"。所以直接把 v6 转发全封 —— 要么全走 v4（受我们控制），
+# 要么别走。实测当前校园网无 v6 出口，这条零代价。
+v6_rules() {
+	nft delete table ip6 "$TABLE" 2>/dev/null
+	on block_ipv6 || return 0
+	if ! nft add table ip6 "$TABLE"; then
+		log "ERROR: 建 ip6 $TABLE 表失败"
+		return 1
+	fi
+	# 链名千万别叫 fwd：nft >= 1.0.9 把 fwd 当语句关键字，会报
+	#   "syntax error, unexpected fwd, expecting string or last"
+	if ! nft "add chain ip6 $TABLE $V6_CHAIN { type filter hook forward priority filter; policy accept; }"; then
+		log "ERROR: 建 ip6 $V6_CHAIN 链失败，IPv6 未被封锁"
+		nft delete table ip6 "$TABLE" 2>/dev/null
+		return 1
+	fi
+	if nft add rule ip6 "$TABLE" "$V6_CHAIN" counter drop; then
+		log "block_ipv6: IPv6 转发已全部 DROP"
+	else
+		log "ERROR: 加 ip6 drop 规则失败，IPv6 未被封锁"
+		return 1
+	fi
 }
 
 # Flash/AC 特征串：nft 没有 string 匹配器，这条只能留在 iptables
@@ -93,6 +121,7 @@ ac_rules() {
 
 rules_down() {
 	nft delete table ip "$TABLE" 2>/dev/null
+	nft delete table ip6 "$TABLE" 2>/dev/null
 	while iptables -t mangle -C FORWARD -j "$AC_CHAIN" 2>/dev/null; do
 		iptables -t mangle -D FORWARD -j "$AC_CHAIN"
 	done
@@ -132,6 +161,9 @@ restart() {
 status() {
 	echo "== nft 表 ip $TABLE =="
 	nft list table ip "$TABLE" 2>/dev/null || echo "（不存在，未启用？）"
+	echo
+	echo "== nft 表 ip6 $TABLE（IPv6 转发封锁）=="
+	nft list table ip6 "$TABLE" 2>/dev/null || echo "（不存在）"
 	echo
 	echo "== iptables AC 链 =="
 	iptables -t mangle -L "$AC_CHAIN" -n -v 2>/dev/null || echo "（无）"

@@ -1,0 +1,7 @@
+config TCPTS_STRIP
+	tristate "tcpts-strip: strip TCP timestamp option from outgoing SYNs"
+	default m
+	help
+	  在 POST_ROUTING 把出网 SYN 里 kind=8 的时间戳选项就地改写成等长
+	  NOP，使服务器不协商 TCP 时间戳。用于抹掉网关侧"按时间戳速率/
+	  开机时长识别同一 IP 后多台设备"的依据。
