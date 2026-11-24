@@ -1,0 +1,37 @@
+#!/bin/sh
+# 把 WAN 改成"无线 STA 连校园网"，取代 eth0.1 有线口。
+#
+# 3A 的 phy1（MT76x2E，5G）同时跑 AP 和 STA 时受 #channels <= 1 限制，
+# 必须同一个信道，所以 radio1 的 channel 要设成 auto 让 hostapd 跟随 STA。
+#
+# 只在还没有 wan_sta 时创建，避免覆盖用户自己改过的 SSID。
+
+[ -f /etc/config/wireless ] || exit 0
+
+if ! uci -q get wireless.wan_sta >/dev/null 2>&1; then
+	uci set wireless.wan_sta=wifi-iface
+	uci set wireless.wan_sta.device='radio1'
+	uci set wireless.wan_sta.mode='sta'
+	uci set wireless.wan_sta.ssid='YBU'
+	uci set wireless.wan_sta.encryption='none'
+	uci set wireless.wan_sta.network='wan'
+	uci set wireless.wan_sta.disabled='0'
+	uci commit wireless
+	logger -t wan-sta "已创建 wireless.wan_sta（radio1 -> YBU）"
+fi
+
+# WAN 不再绑有线口，交给无线 STA 做 dhcp 客户端
+uci -q delete network.wan.device
+uci -q set network.wan.proto='dhcp'
+if uci -q get network.wan.ifname >/dev/null 2>&1; then
+	uci -q delete network.wan.ifname
+fi
+uci -q commit network
+
+# AP 与 STA 同 phy，必须同信道
+[ "$(uci -q get wireless.radio1.channel)" != "auto" ] && {
+	uci set wireless.radio1.channel='auto'
+	uci commit wireless
+}
+
+exit 0

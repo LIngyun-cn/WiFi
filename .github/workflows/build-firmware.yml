@@ -305,7 +305,7 @@ jobs:
           fi
           for f in usr/bin/ua3f etc/init.d/ua3f etc/init.d/rkp-ipid-mark etc/uci-defaults/91-ua3f usr/lib/lua/luci/controller/ua3f.lua \
                    usr/bin/ybu-login etc/init.d/ybu-login etc/config/ybu etc/uci-defaults/95-ybu etc/uci-defaults/96-macclone \
-                   etc/init.d/ganyu-guard etc/config/ganyu etc/uci-defaults/97-ganyu; do
+                   etc/init.d/ganyu-guard etc/config/ganyu etc/uci-defaults/97-ganyu etc/uci-defaults/98-wan-sta; do
             if [ -e "$ROOT/$f" ]; then
               echo "OK   /$f"
             else
@@ -314,9 +314,13 @@ jobs:
             fi
           done
           test -x "$ROOT/etc/init.d/rkp-ipid-mark" || { echo 'init.d/rkp-ipid-mark 没有可执行位'; exit 1; }
-          for f in etc/init.d/ganyu-guard etc/init.d/ybu-login usr/bin/ybu-login; do
+          for f in etc/init.d/ganyu-guard etc/init.d/ybu-login usr/bin/ybu-login etc/init.d/ua3f etc/uci-defaults/98-wan-sta; do
             test -x "$ROOT/$f" || { echo "$f 没有可执行位"; exit 1; }
           done
+
+          # files/ 覆盖层必须赢过 ipk 自带的 ua3f 启动脚本，否则 ipset 补丁等于没打
+          grep -q 'destroy UA3F_LAN' "$ROOT/etc/init.d/ua3f" || {
+            echo 'init.d/ua3f 里没有 ipset 清理补丁（files/ 覆盖层没生效？）'; exit 1; }
 
           echo '===== 镜像体积 ====='
           IMG=$(ls bin/targets/"$TARGET"/*"${PROFILE}"*squashfs-sysupgrade.bin | head -1)

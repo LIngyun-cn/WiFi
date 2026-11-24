@@ -26,4 +26,17 @@ if [ "$current" != "$MAC" ]; then
 	uci -q commit network
 	logger -t macclone "WAN MAC -> $MAC（重启后生效）"
 fi
+
+# WAN 是无线 STA 时，光改 network.wan.macaddr 不够：
+# netifd 管的是逻辑接口，实际 MAC 由 hostapd/wpa_supplicant 给 vif 设，
+# 必须在 wifi-iface 上也写 macaddr，两处保持一致。
+if uci -q get wireless.wan_sta >/dev/null 2>&1; then
+	cur2=$(uci -q get wireless.wan_sta.macaddr)
+	if [ "$cur2" != "$MAC" ]; then
+		uci -q set wireless.wan_sta.macaddr="$MAC"
+		uci -q commit wireless
+		logger -t macclone "STA MAC -> $MAC（重启后生效）"
+	fi
+fi
+
 exit 0
