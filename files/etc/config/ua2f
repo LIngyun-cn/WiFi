@@ -1,0 +1,23 @@
+
+config ua2f 'enabled'
+	option enabled '1'
+
+config ua2f 'firewall'
+	option handle_fw '1'
+	# 443 是 TLS，UA 在密文里，改写只会把连接搞坏
+	option handle_tls '0'
+	# 0 = 不碰内网/校园网地址（10/8、172.16/12、192.168/16 等直接 RETURN），
+	#     只改写真正出公网的 HTTP。设 1 会连校园门户的流量一起改，容易出怪问题
+	option handle_intranet '0'
+
+config ua2f 'main'
+	option mode 'NFQUEUE'
+	option listen_port '10010'
+	option nfqueue_workers '1'
+	option proxy_workers '0'
+	# 全屋所有设备统一伪装成同一台 Windows 桌面机。
+	# 空字符串则用编译期默认 UA；这里显式写死，改 UA 只改这一行 + /etc/init.d/ua2f restart
+	option custom_ua 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0'
+	option disable_connmark '0'
+	option max_http_sessions '0'
+	option session_ttl '300'

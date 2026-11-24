@@ -1,0 +1,18 @@
+#!/bin/sh
+# ua2f：开机自动启用。配置本体在 /etc/config/ua2f（files/ 覆盖层带进来的）。
+# 设备上有 nft，init 会自己建 table inet ua2f 并在 postrouting 用 NFQUEUE，
+# 不需要往 firewall 里塞 include（那是没有 nft 时的老路子），这里顺手清掉旧的。
+[ -x /etc/init.d/ua2f ] || exit 0
+
+uci -q delete firewall.ua2f
+uci -q delete firewall.ua3f
+uci -q commit firewall 2>/dev/null
+
+uci -q set ua2f.enabled.enabled='1'
+uci -q set ua2f.firewall.handle_fw='1'
+uci -q commit ua2f
+
+/etc/init.d/ua2f enable
+/etc/init.d/ua2f restart
+
+exit 0
