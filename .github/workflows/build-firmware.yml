@@ -152,7 +152,9 @@ jobs:
           cp "$GITHUB_WORKSPACE/package-src/ua2f/Makefile" package/ua2f/Makefile
           cp "$GITHUB_WORKSPACE/package-src/ua2f/src.tar.gz" package/ua2f/src.tar.gz
           echo "[ua2f] src.tar.gz sha256: $(sha256sum package/ua2f/src.tar.gz | cut -d' ' -f1)"
-          tar -tzf package/ua2f/src.tar.gz | head -3
+          # 别用 `tar -tzf ... | head -3`：head 提前关管道，tar 报 "stdout: write error" 退 2，
+          # 配上 set -e/pipefail 会把整个步骤判失败（踩过一次）。sed 会读完整个流，安全。
+          tar -tzf package/ua2f/src.tar.gz | sed -n '1,3p'
 
           # ---- 3. 根文件系统覆盖层 ----
           # Windows 上 git core.filemode=false，可执行位不可靠，这里强制修一遍
@@ -319,7 +321,7 @@ jobs:
           fi
 
           echo '===== 镜像体积 ====='
-          IMG=$(ls bin/targets/"$TARGET"/*"${PROFILE}"*squashfs-sysupgrade.bin | head -1)
+          IMG=$(ls bin/targets/"$TARGET"/*"${PROFILE}"*squashfs-sysupgrade.bin | sed -n '1p')
           SZ=$(stat -c%s "$IMG")
           echo "镜像: $IMG"
           echo "大小: $SZ 字节"
