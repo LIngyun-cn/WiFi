@@ -219,7 +219,7 @@ jobs:
           BUILTIN_PKGS="
             openssh-sftp-server nano curl htop conntrack iftop lsof kmod-tcp-bbr luci-app-commands
             ttyd luci-app-ttyd watchcat luci-app-watchcat
-            nlbwmon luci-app-nlbwmon vnstat luci-app-vnstat2
+            nlbwmon luci-app-nlbwmon luci-app-vnstat2
             sqm-scripts kmod-sched-cake luci-app-sqm
             mwan3 luci-app-mwan3
             wireguard-tools kmod-wireguard luci-proto-wireguard
@@ -287,6 +287,19 @@ jobs:
           done
           [ "$fail" -eq 0 ] || { echo '额外包校验失败，先修包名再编译'; exit 1; }
 
+          # 互斥包检查：两个包声明了 Conflicts 还同时 =y，会在最后的
+          # package/install（opkg 收货）阶段炸掉，而且 make 只留一行 "world failed"，
+          # 看不出是谁冲突（#14/#15 就是这么白烧两轮的）。
+          echo '--- 互斥包检查 ---'
+          for pair in "vnstat vnstat2" "vnstat vnstati2" "iperf3 iperf3-ssl"; do
+            set -- $pair
+            if grep -q "^CONFIG_PACKAGE_$1=y" .config && grep -qE "^CONFIG_PACKAGE_$2=[ym]" .config; then
+              echo "::error::$1 与 $2 互斥（后者 Conflicts: $1），不能同时进镜像"
+              fail=1
+            fi
+          done
+          [ "$fail" -eq 0 ] || { echo '互斥包同时被选中，先修 .config'; exit 1; }
+
           echo '--- 设备 profile ---'
           grep -E '^CONFIG_TARGET_ramips_mt76x8_DEVICE' .config
 
@@ -320,6 +333,14 @@ jobs:
           path: ${{ env.SRC }}/build.log
           if-no-files-found: ignore
           retention-days: 7
+
+      - name: 失败时复现收包错误
+        if: failure()
+        run: |
+          cd "$SRC"
+          # V=0 下 package/install 失败可能一个字都不打（只留一行 world failed），
+          # 这里用 V=s 单线程重跑收包阶段，把真正的 opkg 报错逼出来
+          timeout 600 make -j1 V=s package/install 2>&1 | tail -n 250 || true
 
       - name: 校验产物
         run: |
