@@ -24,15 +24,22 @@
  */
 
 #include <linux/module.h>
+#include <linux/moduleparam.h>
 #include <linux/kernel.h>
 #include <linux/version.h>
 #include <linux/skbuff.h>
+#include <linux/netdevice.h>
 #include <linux/in.h>
 #include <linux/ip.h>
 #include <linux/tcp.h>
 #include <linux/netfilter.h>
 #include <linux/netfilter_ipv4.h>
 #include <net/tcp.h>
+
+/* 6.6 上 IP_OFFSET 不一定通过上面的头可见，这里用字面量兜底 */
+#ifndef IP_OFFSET
+#define IP_OFFSET 0x1FFF
+#endif
 
 #ifndef TCPOLEN_TIMESTAMP
 #define TCPOLEN_TIMESTAMP 10
@@ -65,8 +72,11 @@ static unsigned int hook_funcion(void *priv, struct sk_buff *skb,
 	unsigned int ihl, thl, optlen, i;
 	unsigned int saddr, daddr;
 	u32 tcp_len;
-	__wsum csum, partial;
+	__wsum partial;
 	int found = 0;
+
+	(void)priv;
+	(void)state;
 
 	if (!skb)
 		return NF_ACCEPT;

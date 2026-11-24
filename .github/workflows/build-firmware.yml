@@ -315,6 +315,26 @@ jobs:
           cd "$SRC"
           make -j8 download || echo '::warning::部分源码包下载失败，交给编译阶段重试'
 
+      # 自写的两个内核模块单独先编一遍，而且用 V=s。
+      # 原因：整机 make 是不带 V 的，模块编译失败时日志里只有一句
+      # "ERROR: package/xxx failed to build."，真正的原因（哪个函数没声明、
+      # 哪个宏不存在）一个字都不打，等于白烧一轮 30 分钟。
+      - name: 预编译自写内核模块（出错立刻报）
+        run: |
+          set -o pipefail
+          cd "$SRC"
+          for p in package/rkp-ipid package/tcpts-strip; do
+            echo "=== $p ==="
+            if ! make "$p/compile" V=s 2>&1 | tail -n 80 | tee "/tmp/$(basename "$p").log"; then
+              echo "::error::$p 编译失败，上面 80 行是真实原因"
+              exit 1
+            fi
+          done
+          for ko in build_dir/target-*/linux-*/rkp-ipid/rkp-ipid.ko \
+                    build_dir/target-*/linux-*/tcpts-strip/tcpts-strip.ko; do
+            if [ -f $ko ]; then echo "OK   $ko ($(stat -c%s $ko) 字节)"; else echo "MISS $ko"; exit 1; fi
+          done
+
       - name: 编译 (make -j)
         run: |
           set -o pipefail

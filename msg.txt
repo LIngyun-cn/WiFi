@@ -1,15 +1,10 @@
-fix: 两个会让固件"刷完就断网"的真 bug（MAC 撞车 + DHCP 指纹伪装）
+fix: tcpts-strip 编译失败没打原因，先加"模块单独预编译 V=s"再修头文件
 
-1. 96-macclone: AP 和 STA 跑在同一个 phy1 上，克隆出来的 AP 地址如果正好等于
-   STA 的 MAC，内核会让 phy1-sta0 起不来：
-     wpa_supplicant: Could not set interface phy1-sta0 flags (UP)
-     wpa_supplicant: nl-phy1-sta0: Failed to initialize driver interface
-   表现是 AP 亮着、WAN 全断，看起来像固件坏了。现在 ap_mac_for() 保证
-   AP 地址绝不会等于 WAN/STA 地址。
-   顺带把 set_ap_mac 的入参改成十进制（0x56/0x57 写成 86/87），
-   避免 printf '%02x' 对 "0x56" 报错。
+#29 的失败只有一句 ERROR: package/tcpts-strip failed to build.，
+整机 make 不带 V，真正的编译错误一个字都没留下，白烧一轮 30 分钟。
 
-2. 删除 86-wan-dhcp。实测 vendor-class='MSFT 5.0' + defaultreqopts=0 +
-   自定义 reqopts，会让校园网 DHCP 下发 "掩码 /24 + 无默认路由 + 无 DNS"，
-   直接把整机打成断网（同一时间删掉这三项重拨，立刻恢复 /20 + 默认路由 + DNS）。
-   这个伪装不值这个代价，撤掉；workflow 里改成"反面断言"防止它回来。
+1. workflow 新增「预编译自写内核模块（出错立刻报）」：在整机编译之前，
+   对 rkp-ipid 和 tcpts-strip 各跑一次 make <pkg>/compile V=s，
+   失败就把最后 80 行打出来并直接退出 —— 两三分钟就能看到真实报错。
+2. tcpts-strip.c 按 rkp-ipid 的可用写法补齐头文件（moduleparam/netdevice），
+   给 IP_OFFSET 加字面量兜底（6.6 上不保证可见），并消掉未使用变量/参数的告警。
