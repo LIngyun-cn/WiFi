@@ -131,13 +131,28 @@ LuCI → **状态 → 反检测状态**（`/cgi-bin/luci/admin/status/ganyu`）�
 | 看门狗 | `watchcat` + `luci-app-watchcat` | WAN 掉线自动重启接口（**默认不启用**） |
 | 流量统计 | `nlbwmon` + `luci-app-nlbwmon`、`vnstat` + `luci-app-vnstat2` | 按客户端 / 按接口 |
 | 限速 | `sqm-scripts` + `kmod-sched-cake` + `luci-app-sqm` | CAKE 整形（**默认不启用**，无线 WAN 上要手动调） |
-| 多拨容灾 | `mwan3` + `luci-app-mwan3` | 多 WAN 健康检查（**默认不启用**） |
+| 多拨容灾 | `mwan3` + `luci-app-mwan3` | 多 WAN 健康检查（由 `92-packfix` 强制停用，见下） |
 | VPN | `wireguard-tools` + `kmod-wireguard` + `luci-proto-wireguard` | 只有工具和协议，不建隧道 |
 | 端口映射 | `miniupnpd-nftables` + `luci-app-upnp` | nft 后端（**默认不启用**） |
-| DNS | `https-dns-proxy` + `luci-app-https-dns-proxy` | DoH 客户端（**默认不启用**） |
+| DNS | `https-dns-proxy` + `luci-app-https-dns-proxy` | DoH 客户端（由 `92-packfix` 强制停用，见下） |
 | 远程唤醒 | `etherwake` + `luci-app-wol` | 局域网唤醒 |
 | 拥塞控制 | `kmod-tcp-bbr` + `files/etc/uci-defaults/94-bbr` | 首启把 `tcp_congestion_control` 设成 `bbr`，写进 `/etc/sysctl.conf` |
 | 命令页 | `luci-app-commands` | LuCI 里存常用命令 |
+
+### `92-packfix`：为什么有两个包必须默认关掉
+
+这两个包**装上就接管网络**，在没通过校园网门户认证的环境里会把上网能力搞死，
+所以 `files/etc/uci-defaults/92-packfix` 在首启时无条件停用它们（包仍装在固件里，
+`/etc/init.d/xxx enable` 随时能开回来）：
+
+| 包 | 它干了什么 | 现场症状 |
+|---|---|---|
+| `https-dns-proxy` | 默认 `force_dns=1` + `dnsmasq_config_update='*'`，首启就把 dnsmasq 上游换成 `127.0.0.1#5053`/`#5054`（Cloudflare / Google 的 DoH）。未认证时 443 出不去 → DoH 连不上 → **所有解析超时** | `nslookup www.baidu.com` → `;; connection timed out; no servers could be reached`，但 `ping 10.126.112.1` 正常 |
+| `mwan3` | 默认拿 `1.0.0.1`/`1.1.1.1`/`208.67.222.222` 做 track 目标，校园网未认证时不可达 → wan 被判 offline，五条策略全 unreachable | `mwan3 status` → `interface wan is offline and tracking is active`，日志每 4 秒刷 `Check (ping) failed` |
+
+`92-packfix` 除了停服务，还会 `uci -q delete dhcp.@dnsmasq[0].server / noresolv / doh_server / ...`，
+因为光停服务不够——被改过的 dnsmasq 配置会留在 `/etc/config/dhcp` 里继续生效。
+
 
 刻意**没**装的：`wpad-mbedtls`（换掉 basic 净增 264 KB，收益不明显）、
 `sing-box`/`v2ray`/`xray`（十几 MB 的 Go 二进制，正是 UA3F 翻车的那个坑）、

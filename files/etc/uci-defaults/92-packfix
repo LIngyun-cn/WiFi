@@ -1,0 +1,48 @@
+#!/bin/sh
+# ============================================================================
+# 32 个附加包里有两个"装上就默认接管网络"的服务，在没通过校园网门户认证的
+# 环境里会把整台路由器的上网能力搞死。这里统一关掉，需要时手动开。
+#
+# 1) https-dns-proxy
+#    它的默认配置是 force_dns=1 + dnsmasq_config_update='*'，第一次启动就把
+#    dnsmasq 上游换成 127.0.0.1#5053 / #5054（Cloudflare / Google 的 DoH）。
+#    没过门户认证时 443 出不去 → DoH 连不上 → dnsmasq 所有解析超时 →
+#    nslookup 报 "connection timed out; no servers could be reached"。
+#    实测现场：刷完机 DNS 全挂，nslookup 一个都解不出来。
+#
+# 2) mwan3
+#    单 WAN 场景本来就多余，而且它默认拿 1.0.0.1 / 1.1.1.1 / 208.67.222.222
+#    做 track 目标，教工网/校园网未认证时这些地址不可达 → wan 被判 offline →
+#    五条策略全 unreachable，还会每 4 秒往日志里刷 "Check (ping) failed"。
+#    实测现场：mwan3 status 显示 "interface wan is offline and tracking is active"。
+#
+# 两个包仍然留在固件里（opkg list-installed 可见），想用随时 /etc/init.d/xxx enable。
+# ============================================================================
+
+# --- https-dns-proxy：停用 + 清掉它对 dnsmasq 的改写 ---
+if [ -x /etc/init.d/https-dns-proxy ]; then
+	/etc/init.d/https-dns-proxy stop    >/dev/null 2>&1
+	/etc/init.d/https-dns-proxy disable >/dev/null 2>&1
+
+	uci -q delete dhcp.@dnsmasq[0].server
+	uci -q delete dhcp.@dnsmasq[0].noresolv
+	uci -q delete dhcp.@dnsmasq[0].doh_server
+	uci -q delete dhcp.@dnsmasq[0].doh_backup_server
+	uci -q delete dhcp.@dnsmasq[0].doh_backup_noresolv
+
+	uci -q set https-dns-proxy.config.force_dns='0'
+	uci -q set https-dns-proxy.config.dnsmasq_config_update=''
+	uci -q commit https-dns-proxy
+
+	logger -t ganyu 'https-dns-proxy 已停用（它会改 dnsmasq 上游，未认证时把 DNS 搞死）'
+fi
+
+# --- mwan3：停用（单 WAN 用不上，且会把 wan 判成 offline） ---
+if [ -x /etc/init.d/mwan3 ]; then
+	/etc/init.d/mwan3 stop    >/dev/null 2>&1
+	/etc/init.d/mwan3 disable >/dev/null 2>&1
+	logger -t ganyu 'mwan3 已停用（单 WAN 不需要，且默认 track 目标在校园网不可达）'
+fi
+
+uci -q commit dhcp
+exit 0
