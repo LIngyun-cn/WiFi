@@ -62,19 +62,37 @@ fi
 # 但后果更直接（通报/断网）。
 # 这里把两个 AP 的 BSSID 也换成克隆 MAC 的 OUI，看起来就是"某台笔记本开的
 # 移动热点" —— Windows 移动热点本来就直接拿网卡 MAC 当 BSSID。
+#
+# ★ 血泪教训（v9 线上实测）：AP 和 STA 跑在同一个 phy1 上。
+#   如果算出来的 AP 地址正好等于 STA 的 MAC，内核会让 phy1-sta0 起不来：
+#       wpa_supplicant: Could not set interface phy1-sta0 flags (UP)
+#       wpa_supplicant: nl80211: Could not set interface 'phy1-sta0' UP
+#       wpa_supplicant: phy1-sta0: Failed to initialize driver interface
+#   后果就是 AP 亮着、WAN 全断（拿不到 DHCP、也没法登录门户），
+#   现场看起来像"固件坏了"。所以下面必须保证 AP 地址 ≠ WAN/STA 地址。
 APOUI=$(echo "$MAC" | cut -d: -f1-3)
 AP4=$(echo "$MAC" | cut -d: -f4)
 AP5=$(echo "$MAC" | cut -d: -f5)
 
-set_ap_mac() {
-	[ -n "$(uci -q get "wireless.$1")" ] || return 0
-	[ "$(uci -q get "wireless.$1.macaddr")" = "$2" ] && return 0
-	uci -q set "wireless.$1.macaddr=$2"
-	logger -t macclone "AP BSSID $1 -> $2（重启后生效）"
+ap_mac_for() {
+	_m="$APOUI:$AP4:$AP5:$(printf '%02x' "$1")"
+	if [ "$_m" = "$MAC" ]; then
+		# 撞上了 WAN/STA 的 MAC，往后挪一个
+		_m="$APOUI:$AP4:$AP5:$(printf '%02x' "$(( $1 + 1 ))")"
+	fi
+	printf '%s' "$_m"
 }
 
-set_ap_mac default_radio0 "$APOUI:$AP4:$AP5:56"
-set_ap_mac default_radio1 "$APOUI:$AP4:$AP5:57"
+set_ap_mac() {
+	_want=$(ap_mac_for "$2")
+	[ -n "$(uci -q get "wireless.$1")" ] || return 0
+	[ "$(uci -q get "wireless.$1.macaddr")" = "$_want" ] && return 0
+	uci -q set "wireless.$1.macaddr=$_want"
+	logger -t macclone "AP BSSID $1 -> $_want（重启后生效）"
+}
+
+set_ap_mac default_radio0 86	# 0x56
+set_ap_mac default_radio1 87	# 0x57
 uci -q commit wireless
 
 exit 0

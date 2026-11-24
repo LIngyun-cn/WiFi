@@ -1,0 +1,15 @@
+fix: 两个会让固件"刷完就断网"的真 bug（MAC 撞车 + DHCP 指纹伪装）
+
+1. 96-macclone: AP 和 STA 跑在同一个 phy1 上，克隆出来的 AP 地址如果正好等于
+   STA 的 MAC，内核会让 phy1-sta0 起不来：
+     wpa_supplicant: Could not set interface phy1-sta0 flags (UP)
+     wpa_supplicant: nl-phy1-sta0: Failed to initialize driver interface
+   表现是 AP 亮着、WAN 全断，看起来像固件坏了。现在 ap_mac_for() 保证
+   AP 地址绝不会等于 WAN/STA 地址。
+   顺带把 set_ap_mac 的入参改成十进制（0x56/0x57 写成 86/87），
+   避免 printf '%02x' 对 "0x56" 报错。
+
+2. 删除 86-wan-dhcp。实测 vendor-class='MSFT 5.0' + defaultreqopts=0 +
+   自定义 reqopts，会让校园网 DHCP 下发 "掩码 /24 + 无默认路由 + 无 DNS"，
+   直接把整机打成断网（同一时间删掉这三项重拨，立刻恢复 /20 + 默认路由 + DNS）。
+   这个伪装不值这个代价，撤掉；workflow 里改成"反面断言"防止它回来。

@@ -384,7 +384,6 @@ jobs:
                    usr/bin/ganyu-status \
                    etc/uci-defaults/94-bbr etc/uci-defaults/92-packfix \
                    etc/uci-defaults/88-bindlan etc/uci-defaults/89-wan-hostname \
-                   etc/uci-defaults/86-wan-dhcp \
                    etc/hotplug.d/iface/96-harden-wan \
                    usr/share/luci/menu.d/luci-app-ganyu.json \
                    usr/share/rpcd/acl.d/luci-app-ganyu.json \
@@ -400,7 +399,7 @@ jobs:
           # 两个自编内核模块必须落进 /lib/modules
           ls "$ROOT/lib/modules/6.6.144/rkp-ipid.ko" >/dev/null 2>&1 || { echo 'rootfs 里没有 rkp-ipid.ko'; exit 1; }
           ls "$ROOT/lib/modules/6.6.144/tcpts-strip.ko" >/dev/null 2>&1 || { echo 'rootfs 里没有 tcpts-strip.ko'; exit 1; }
-          for f in etc/init.d/ganyu-guard etc/init.d/ybu-login usr/bin/ybu-login etc/init.d/ua2f etc/uci-defaults/93-ua2f etc/uci-defaults/98-wan-sta usr/bin/ganyu-status etc/uci-defaults/94-bbr etc/uci-defaults/92-packfix etc/uci-defaults/88-bindlan etc/uci-defaults/89-wan-hostname etc/uci-defaults/86-wan-dhcp etc/hotplug.d/iface/96-harden-wan; do
+          for f in etc/init.d/ganyu-guard etc/init.d/ybu-login usr/bin/ybu-login etc/init.d/ua2f etc/uci-defaults/93-ua2f etc/uci-defaults/98-wan-sta usr/bin/ganyu-status etc/uci-defaults/94-bbr etc/uci-defaults/92-packfix etc/uci-defaults/88-bindlan etc/uci-defaults/89-wan-hostname etc/hotplug.d/iface/96-harden-wan; do
             test -x "$ROOT/$f" || { echo "$f 没有可执行位"; exit 1; }
           done
 
@@ -450,8 +449,13 @@ jobs:
             echo '::error::/etc/config/ganyu 缺少 block_doh 开关'; exit 1; }
           grep -q 'use-application-dns.net' "$ROOT/etc/init.d/ganyu-guard" || {
             echo '::error::ganyu-guard 里没有 dnsmasq canary'; exit 1; }
-          grep -q 'MSFT 5.0' "$ROOT/etc/uci-defaults/86-wan-dhcp" || {
-            echo '::error::86-wan-dhcp 里没有 vendor-class'; exit 1; }
+          # 反面断言：DHCP 指纹伪装（vendor-class / 自定义 reqopts）实测会把
+          # 校园网 DHCP 打成"给 /24 掩码 + 不发默认路由 + 不发 DNS"，直接断网。
+          # 这个坑不许再回来，所以断言它不存在。
+          test ! -e "$ROOT/etc/uci-defaults/86-wan-dhcp" || {
+            echo '::error::86-wan-dhcp 又出现了：它会打断 DHCP 路由下发'; exit 1; }
+          grep -q 'ap_mac_for' "$ROOT/etc/uci-defaults/96-macclone" || {
+            echo '::error::96-macclone 缺少 AP/STA 撞 MAC 的规避逻辑'; exit 1; }
           grep -q '{ 80, 8080 }' "$ROOT/etc/init.d/ua2f" || {
             echo '::error::ua2f 没有覆盖 8080 端口'; exit 1; }
           grep -q '3c:a9:f4' "$ROOT/etc/uci-defaults/96-macclone" || {
