@@ -394,8 +394,15 @@ jobs:
 
           # 三个断言：ua2f 用的是我们改过的配置（不是包自带默认）、init 走的是 NFQUEUE 而不是 iptables 老路、
           # 而且 ua3f 那种"装了但跑不动"的包这次真的不该再出现在镜像里
-          grep -q 'Edg/' "$ROOT/etc/config/ua2f" || {
+          # 注意：断言必须跟着 custom_ua 一起改 —— 这里原来看的是 'Edg/'，
+          # 后来 UA 换成 111 字节的 Chrome 串（ua2f 是原地等长替换，太长会被截断），
+          # 断言没跟着改，直接把 #16 一个已经编好的镜像判成失败（白烧一轮）。
+          grep -q 'Chrome/131.0.0.0 Safari/537.36' "$ROOT/etc/config/ua2f" || {
             echo 'etc/config/ua2f 不是 files/ 覆盖层那一份（custom_ua 没生效？）'; exit 1; }
+          if grep -q 'Edg/' "$ROOT/etc/config/ua2f"; then
+            echo '::error::custom_ua 还是旧的 125 字节带 Edg 的串，ua2f 会把它截断'
+            exit 1
+          fi
           grep -q 'queue num 10010' "$ROOT/etc/init.d/ua2f" || {
             echo 'init.d/ua2f 里找不到 NFQUEUE 规则'; exit 1; }
           if [ -e "$ROOT/usr/bin/ua3f" ]; then
@@ -417,6 +424,20 @@ jobs:
 
           echo '===== manifest 关键行 ====='
           grep -E '^ua2f|^libnetfilter|^kmod-nft-queue|^libmnl|^kmod-rkp-ipid|^iptables|^tcpdump|^iperf3|^mtr|^luci-i18n' bin/targets/"$TARGET"/*.manifest || true
+
+      - name: 失败时也上传镜像（供排查）
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-image-${{ github.run_number }}
+          path: |
+            openwrt-src/bin/targets/ramips/mt76x8/*sysupgrade.bin
+            openwrt-src/bin/targets/ramips/mt76x8/*.manifest
+            openwrt-src/bin/targets/ramips/mt76x8/sha256sums
+            openwrt-src/.config
+          if-no-files-found: ignore
+          retention-days: 7
+          include-hidden-files: true
 
       - name: 上传固件
         uses: actions/upload-artifact@v4
