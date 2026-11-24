@@ -205,6 +205,11 @@ jobs:
           CONFIG_PACKAGE_iptables-mod-conntrack-extra=y
           CONFIG_PACKAGE_iptables-mod-filter=y
           CONFIG_PACKAGE_kmod-nf-conntrack-netlink=y
+          # 下面三个是「虚拟依赖」的真实提供者，必须显式选，否则收包阶段报
+          # pkg_hash_check_unresolved（sqm-scripts 要 tc、mwan3 要 ip6tables）
+          CONFIG_PACKAGE_tc-tiny=y
+          CONFIG_PACKAGE_ip6tables-nft=y
+          CONFIG_PACKAGE_ipset=y
           EOF
 
           # ---- 内置附加包 ----
@@ -246,7 +251,11 @@ jobs:
             CONFIG_PACKAGE_luci-compat \
             CONFIG_PACKAGE_iptables-mod-tproxy \
             CONFIG_PACKAGE_iptables-mod-filter \
-            CONFIG_PACKAGE_kmod-nf-conntrack-netlink
+            CONFIG_PACKAGE_kmod-nf-conntrack-netlink \
+            CONFIG_PACKAGE_tc-tiny \
+            CONFIG_PACKAGE_ip6tables-nft \
+            CONFIG_PACKAGE_ipset \
+            CONFIG_PACKAGE_iptables-nft
           do
             if grep -q "^${s}=y" .config; then
               echo "OK   $s"
@@ -298,8 +307,19 @@ jobs:
           cd "$SRC"
           echo '===== tail build.log ====='
           tail -n 200 build.log 2>/dev/null || true
+          echo '===== 依赖 / 冲突类真实报错 ====='
+          grep -nEi 'pkg_hash_check_unresolved|missing dependencies|Collected errors|check_data_file_clashes|Cannot install|is not available|unsatisfied|conflict' build.log 2>/dev/null | tail -n 120 || true
           echo '===== 关键字 ====='
           grep -nEi '(^make.*\*\*\*|error:|Error [0-9]+|failed)' build.log 2>/dev/null | tail -n 80 || true
+
+      - name: 失败时上传 build.log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ github.run_number }}
+          path: ${{ env.SRC }}/build.log
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: 校验产物
         run: |

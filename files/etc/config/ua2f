@@ -17,7 +17,12 @@ config ua2f 'main'
 	option proxy_workers '0'
 	# 全屋所有设备统一伪装成同一台 Windows 桌面机。
 	# 空字符串则用编译期默认 UA；这里显式写死，改 UA 只改这一行 + /etc/init.d/ua2f restart
-	option custom_ua 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0'
+	# ua2f 是「严格原地替换」：nfq_tcp_mangle_ipv4(pkt, ua_offset, ua_len, replacement, ua_len)，
+	# 替换串长度必须等于原 UA 长度 —— 原 UA 更长就补空格，更短就截断。
+	# 所以这里刻意选 111 字节的 Chrome UA（比主流桌面浏览器 UA 短），
+	# 让它落在「补空格」这一侧，出网请求里的 UA 始终是完整可解析的。
+	# 改这里请重新数长度，别超过 111。
+	option custom_ua 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
 	option disable_connmark '0'
 	option max_http_sessions '0'
 	option session_ttl '300'
