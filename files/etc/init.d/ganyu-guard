@@ -63,8 +63,12 @@ rules_up() {
 	# 拦了它 = 路由器自己也解析不了（第一次部署就踩了：nslookup 全超时）。
 	if nft "add chain ip $TABLE $IN_CHAIN { type filter hook input priority filter; policy accept; }"; then
 		nft_run "add rule ip $TABLE $IN_CHAIN iifname { \"$lan\", \"lo\" } counter accept"
-		nft_run add rule ip "$TABLE" $IN_CHAIN udp dport 53 counter drop
-		nft_run add rule ip "$TABLE" $IN_CHAIN udp dport 123 counter drop
+		# 本机服务端口：53 dnsmasq / 123 ntpd / 67 DHCP / 22 dropbear /
+		# 80,443 uhttpd / 7681 ttyd。fw4 的 wan zone 已经 REJECT，这里是
+		# "fw4 被人改过/重载失败" 时的第二道闸。
+		# 不能拦 udp 68 —— 那是我们作为 DHCP 客户端收 OFFER/ACK 的端口。
+		nft_run "add rule ip $TABLE $IN_CHAIN udp dport { 53, 67, 123 } counter drop"
+		nft_run "add rule ip $TABLE $IN_CHAIN tcp dport { 22, 53, 80, 443, 7681 } counter drop"
 	else
 		log "ERROR: 建 input 兜底链失败"
 	fi

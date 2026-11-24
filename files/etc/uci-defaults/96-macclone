@@ -56,4 +56,25 @@ if uci -q get wireless.wan_sta >/dev/null 2>&1; then
 	fi
 fi
 
+# 自己开的 AP 同样在自报 MIB：BSSID 原来是 50:64:2B:C1:00:56 / :57，
+# 和小米出厂网卡同 OUI。学校查"私接路由器"时是用巡测/嗅探扫 2.4G/5G 的，
+# 扫到一个小米 OUI 的 BSSID 就等于当场抓到人 —— 这跟"多设备检测"是两码事，
+# 但后果更直接（通报/断网）。
+# 这里把两个 AP 的 BSSID 也换成克隆 MAC 的 OUI，看起来就是"某台笔记本开的
+# 移动热点" —— Windows 移动热点本来就直接拿网卡 MAC 当 BSSID。
+APOUI=$(echo "$MAC" | cut -d: -f1-3)
+AP4=$(echo "$MAC" | cut -d: -f4)
+AP5=$(echo "$MAC" | cut -d: -f5)
+
+set_ap_mac() {
+	[ -n "$(uci -q get "wireless.$1")" ] || return 0
+	[ "$(uci -q get "wireless.$1.macaddr")" = "$2" ] && return 0
+	uci -q set "wireless.$1.macaddr=$2"
+	logger -t macclone "AP BSSID $1 -> $2（重启后生效）"
+}
+
+set_ap_mac default_radio0 "$APOUI:$AP4:$AP5:56"
+set_ap_mac default_radio1 "$APOUI:$AP4:$AP5:57"
+uci -q commit wireless
+
 exit 0

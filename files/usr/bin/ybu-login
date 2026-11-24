@@ -142,8 +142,20 @@ build_url() {
 	mac=$(c wan_mac | tr -d ':' | tr 'A-F' 'a-f')
 	[ -n "$mac" ] || mac=$(wan_iface_mac)
 	[ -n "$mac" ] || mac='000000000000'
-	ts=$(date +%s)
-	printf '%s' "${portal}?c=Portal&a=login&callback=dr${ts}000&login_method=1&user_account=${prefix}${acct}&user_password=${pw}&wlan_user_ip=${ip}&wlan_user_ipv6=&wlan_user_mac=${mac}&wlan_ac_ip=&wlan_ac_name=&jsVersion=3.1&_=${ts}000"
+	# 时间戳：真浏览器里 jQuery 给的 callback 和 _ 都是 13 位毫秒数，而且
+	# 同一个页面里后续请求的 _ 一定比前一个大。原来写死 `${ts}000`
+	# （秒 + 三个 0）—— 每行都以"整毫秒 000"结尾，门户日志一眼是脚本。
+	# 这里用"秒 + 自增 3 位计数"，读起来就是一台很闲的机器在慢慢发请求。
+	# 注意：busybox awk 是 32 位整数，`printf "%d", t*1000` 会溢出成
+	# 2147483647（实测踩过），所以全程按字符串拼，不做乘法。
+	sec=$(date +%s)
+	cnt=$(cat /tmp/ybu-login.cnt 2>/dev/null)
+	case "$cnt" in ''|*[!0-9]*) cnt=0 ;; esac
+	cnt=$(( (cnt + 1) % 1000 ))
+	echo "$cnt" > /tmp/ybu-login.cnt
+	cb="${sec}$(printf '%03d' "$cnt")"
+	ms="${sec}$(printf '%03d' $(( (cnt + 3) % 1000 )))"
+	printf '%s' "${portal}?c=Portal&a=login&callback=dr${cb}&login_method=1&user_account=${prefix}${acct}&user_password=${pw}&wlan_user_ip=${ip}&wlan_user_ipv6=&wlan_user_mac=${mac}&wlan_ac_ip=&wlan_ac_name=&jsVersion=3.1&_=${ms}"
 }
 
 # ---------- 登录 ----------
@@ -159,7 +171,9 @@ login() {
 		return 2
 	fi
 	url=$(build_url)
-	resp=$(fetch -T 12 "$url" 2>/dev/null)
+	# 带 Referer：真浏览器的 XHR 一定带门户页面地址，裸请求在网关日志里
+	# 是"没有来源的 GET"，比 UA 更容易被注意到。
+	resp=$(fetch --header="Referer: $(c portal)" -T 12 "$url" 2>/dev/null)
 	log "login($ip) => ${resp:-<空响应>}"
 	echo "$resp" | grep -q '"result":"1"'
 }
