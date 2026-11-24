@@ -56,6 +56,21 @@ b64() {
 	}'
 }
 
+# uclient-fetch 的默认 UA 是 "uclient-fetch/…" —— 门户日志里一眼就是脚本，
+# 而"同一个 MAC 上先是浏览器登录、之后全是 uclient-fetch"本身就是个特征。
+# 统一成桌面 Chrome 的 UA，请求头部也按浏览器补齐。
+#
+# 注意：选项不能塞进一个变量再展开 —— UA 里有空格，`$UA_OPTS` 会被词分割成
+# 一堆碎参数（uclient-fetch 只认 `--header='Header: value'`，没有 -H 短选项）。
+# 所以全部写死在函数里，所有对外请求都走 fetch()。
+fetch() {
+	uclient-fetch -q -O - \
+		-U 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36' \
+		--header='Accept-Language: zh-CN,zh;q=0.9,en;q=0.8' \
+		--header='Accept: */*' \
+		"$@"
+}
+
 # ---------- WAN 地址 ----------
 wan_ip() {
 	local ifc ip
@@ -80,7 +95,7 @@ online() {
 	local url body rc
 	url=$(c probe_url)
 	[ -n "$url" ] || url='http://www.gstatic.com/generate_204'
-	body=$(uclient-fetch -q -O - -T 8 "$url" 2>/dev/null)
+	body=$(fetch -T 8 "$url" 2>/dev/null)
 	rc=$?
 	# 连不上 → 不是"在线"，也不算被劫持
 	[ "$rc" -ne 0 ] && return 2
@@ -144,7 +159,7 @@ login() {
 		return 2
 	fi
 	url=$(build_url)
-	resp=$(uclient-fetch -q -O - -T 12 "$url" 2>/dev/null)
+	resp=$(fetch -T 12 "$url" 2>/dev/null)
 	log "login($ip) => ${resp:-<空响应>}"
 	echo "$resp" | grep -q '"result":"1"'
 }
