@@ -1,0 +1,8 @@
+#!/bin/sh
+# 首次启动启用防检测规则集。
+# 规则本身在 /etc/init.d/ganyu-guard 里按 /etc/config/ganyu 的开关执行。
+[ -x /etc/init.d/ganyu-guard ] && {
+	/etc/init.d/ganyu-guard enable
+	/etc/init.d/ganyu-guard restart
+}
+exit 0

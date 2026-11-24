@@ -1,0 +1,142 @@
+#!/bin/sh /etc/rc.common
+# ganyu-guard —— 校园网"别被认出来"的一套规则
+#
+#   dns_hijack   把 LAN 客户端的 53（udp/tcp）重定向到本地 dnsmasq
+#                → 客户端自设 DNS 失效，resolver 指纹统一
+#   block_dot    封 853（DoT），防止绕过上面的重定向
+#   block_ntp    客户端 123 重定向到本地 ntpd
+#   ttl_unify    postrouting 把 TTL 统一成 64 → 藏住"经过几跳"
+#   ac_probe     Flash/AC 注入特征拦截（默认关，需 iptables-mod-filter）
+#
+# 全部规则写在自己独立的 nft 表 ip ganyu 里，不碰 fw4 的 inet fw4，
+# 也不依赖 xt_REDIRECT/xt_HL —— 实测这台 24.10.8 上 iptables-nft 做
+# nat REDIRECT 会报 "Extension REDIRECT revision 0 not supported"，
+# 而 nft 原生 `redirect to :53` / `ip ttl set 64` 都正常。
+#
+# 注意 1：rc.common 判断的是「变量非空」，这里绝不能写 USE_PROCD=0，
+#        否则 start() 会被 procd 分支覆盖成空壳（rkp-ipid-mark 踩过）。
+# 注意 2：本文件必须是 UTF-8 无 BOM，带 BOM 会导致 shebang 失效。
+
+START=98
+STOP=11
+EXTRA_COMMANDS="status"
+EXTRA_HELP="	status	打印 nft 表与命中计数"
+
+CONF=ganyu
+TABLE=ganyu
+AC_CHAIN=GANYU_AC
+
+c() { uci -q get "${CONF}.main.$1"; }
+log() { logger -t ganyu-guard "$*"; }
+on() { [ "$(c "$1")" = "1" ]; }
+
+nft_run() { nft "$@" >/dev/null 2>&1; }
+
+rules_up() {
+	local lan
+
+	# 先删后建，天然幂等
+	nft delete table ip "$TABLE" 2>/dev/null
+	if ! nft add table ip "$TABLE"; then
+		log "ERROR: nft add table 失败"
+		return 1
+	fi
+	nft "add chain ip $TABLE pre { type nat hook prerouting priority dstnat; policy accept; }" ||
+		log "ERROR: 建 pre 链失败"
+	nft "add chain ip $TABLE post { type filter hook postrouting priority mangle; policy accept; }" ||
+		log "ERROR: 建 post 链失败"
+
+	lan=$(c lan_iface)
+	[ -n "$lan" ] || lan=br-lan
+
+	if on dns_hijack; then
+		nft_run add rule ip "$TABLE" pre iifname "$lan" udp dport 53 counter redirect to :53
+		nft_run add rule ip "$TABLE" pre iifname "$lan" tcp dport 53 counter redirect to :53
+		log "dns_hijack: $lan 53/udp+tcp -> 本机 dnsmasq"
+	fi
+
+	if on block_ntp; then
+		nft_run add rule ip "$TABLE" pre iifname "$lan" udp dport 123 counter redirect to :123
+		log "block_ntp: $lan 123/udp -> 本机 ntpd"
+	fi
+
+	if on ttl_unify; then
+		nft_run add rule ip "$TABLE" post counter ip ttl set 64
+		log "ttl_unify: TTL -> 64"
+	fi
+
+	if on block_dot; then
+		nft_run add rule ip "$TABLE" post tcp dport 853 counter drop
+		log "block_dot: 853/tcp 已封"
+	fi
+
+	ac_rules
+}
+
+# Flash/AC 特征串：nft 没有 string 匹配器，这条只能留在 iptables
+ac_rules() {
+	iptables -t mangle -N "$AC_CHAIN" 2>/dev/null
+	iptables -t mangle -F "$AC_CHAIN" 2>/dev/null
+	iptables -t mangle -C FORWARD -j "$AC_CHAIN" 2>/dev/null ||
+		iptables -t mangle -A FORWARD -j "$AC_CHAIN"
+
+	on ac_probe || return 0
+
+	# 材料里的 --algobm 是错的，必须 --algo bm
+	if iptables -t mangle -A "$AC_CHAIN" -p tcp --sport 80 --tcp-flags ACK ACK \
+		-m string --algo bm --string ' src="http://1.1.1.' -j DROP 2>/dev/null; then
+		log "ac_probe: 特征串拦截已启用"
+	else
+		log "ac_probe: 需要 iptables-mod-filter（xt_string），当前缺失"
+	fi
+}
+
+rules_down() {
+	nft delete table ip "$TABLE" 2>/dev/null
+	while iptables -t mangle -C FORWARD -j "$AC_CHAIN" 2>/dev/null; do
+		iptables -t mangle -D FORWARD -j "$AC_CHAIN"
+	done
+	iptables -t mangle -F "$AC_CHAIN" 2>/dev/null
+	iptables -t mangle -X "$AC_CHAIN" 2>/dev/null
+}
+
+# 重定向到本地 123 才有意义
+ensure_ntpserver() {
+	on ntp_local || return 0
+	[ "$(uci -q get system.ntp.enable_server)" = "1" ] && return 0
+	uci -q set system.ntp.enable_server='1'
+	uci -q commit system
+	/etc/init.d/sysntpd reload 2>/dev/null || /etc/init.d/sysntpd restart 2>/dev/null
+	log "system.ntp.enable_server=1 并重启 ntpd"
+}
+
+start() {
+	if [ "$(c enabled)" != "1" ]; then
+		rules_down
+		log "ganyu.main.enabled != 1，未启用"
+		return 0
+	fi
+	rules_up
+	ensure_ntpserver
+}
+
+stop() {
+	rules_down
+}
+
+restart() {
+	stop
+	start
+}
+
+status() {
+	echo "== nft 表 ip $TABLE =="
+	nft list table ip "$TABLE" 2>/dev/null || echo "（不存在，未启用？）"
+	echo
+	echo "== iptables AC 链 =="
+	iptables -t mangle -L "$AC_CHAIN" -n -v 2>/dev/null || echo "（无）"
+	echo
+	echo "== ntpd =="
+	echo "enable_server = $(uci -q get system.ntp.enable_server)"
+	ps w 2>/dev/null | grep -c '[n]tpd'
+}

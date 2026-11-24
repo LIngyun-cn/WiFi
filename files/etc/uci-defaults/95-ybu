@@ -1,0 +1,8 @@
+#!/bin/sh
+# 首次启动：装好 ybu-login 的可执行位并注册服务。
+# 默认不启用（enabled=0），避免没配学号时每 60 秒刷一条失败日志。
+# 配置好之后：uci set ybu.main.enabled=1 && uci commit ybu && /etc/init.d/ybu-login restart
+
+[ -f /usr/bin/ybu-login ] && chmod 755 /usr/bin/ybu-login
+[ -x /etc/init.d/ybu-login ] && /etc/init.d/ybu-login enable
+exit 0

@@ -1,0 +1,16 @@
+config main 'main'
+	option enabled '0'
+	# 学号（不含前缀）
+	option account ''
+	# 密码。默认按明文发；若门户要求 base64，把 password_base64 设 1
+	option password ''
+	option password_base64 '0'
+	# 部分锐捷部署要求账号带前缀，如 ',0,'；实测本校本部不需要，留空即可
+	option account_prefix ''
+	option portal 'http://10.10.252.1:801/eportal/'
+	option probe_url 'http://connect.rom.miui.com/generate_204'
+	# 探测用的出口接口（wan / wwan / 你自建的 interface 名）
+	option interface 'wan'
+	option interval '60'
+	# WAN 口要克隆成的 MAC（复制你 PC 的 MAC 用；不填就用网卡原始 MAC）
+	option wan_mac ''

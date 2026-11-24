@@ -1,0 +1,193 @@
+#!/bin/sh
+# ybu-login —— 延边大学校园网（锐捷 EPORTAL 3.0）自动登录
+#
+# 接口来自 xuyanhenry/ybu-wifi-login 的思路，但做了这些修正：
+#   * 不用 [[ ]]（busybox ash 不支持），全部改成 POSIX test
+#   * 判断逻辑原来写反了（grep 不到 success 反而报成功），改成看 result":"1"
+#   * 取 WAN IP 不用 ifconfig|grep -v 192（多网卡/IPv6 下会抓错），改用
+#     ubus + jsonfilter 精确取 wan 的 ipv4-address[0]
+#   * 不用 curl（本固件没编 curl），改用自带的 uclient-fetch
+#   * base64 不用 applet（本固件 base64 被裁掉），用 awk 现算
+#   * 增加在线探测：204 探针，body 为空才认为通
+#   * 由 procd 托管常驻，掉线自动重登，不依赖 crontab（重启不丢）
+#
+# 配置：/etc/config/ybu （uci set ybu.main.account=学号）
+# 手动：ybu-login login | ybu-login check | ybu-login status
+
+. /lib/functions.sh
+
+TAG=ybu-login
+CONF=ybu
+
+log() { logger -t "$TAG" "$*"; }
+
+c() { uci -q get "${CONF}.main.$1"; }
+
+# ---------- base64 ----------
+# 本固件裁掉了 od，也裁掉了 base64 applet，只剩 hexdump + awk，
+# 所以先把字节转成十六进制串，再在 awk 里按 6bit 分组编码。
+b64() {
+	printf '%s' "$1" | hexdump -v -e '1/1 "%02x"' | awk '
+	BEGIN {
+		TBL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+		H = "0123456789abcdef"
+	}
+	function ch(i) { return substr(TBL, i + 1, 1) }
+	{
+		s = $0
+		for (k = 1; k <= length(s); k++) {
+			d = index(H, substr(s, k, 1)) - 1
+			if (d < 0) continue
+			if (pend) { b[n++] = pv * 16 + d; pend = 0 }
+			else { pv = d; pend = 1 }
+		}
+	}
+	END {
+		for (i = 0; i < n; i += 3) {
+			c1 = b[i]
+			c2 = (i + 1 < n) ? b[i + 1] : 0
+			c3 = (i + 2 < n) ? b[i + 2] : 0
+			v = c1 * 65536 + c2 * 256 + c3
+			printf "%s%s", ch(int(v / 262144)), ch(int(v / 4096) % 64)
+			printf "%s", (i + 1 < n) ? ch(int(v / 64) % 64) : "="
+			printf "%s", (i + 2 < n) ? ch(v % 64) : "="
+		}
+		printf "\n"
+	}'
+}
+
+# ---------- WAN 地址 ----------
+wan_ip() {
+	local ifc ip
+	ifc=$(c interface)
+	[ -n "$ifc" ] || ifc=wan
+	ip=$(ubus call "network.interface.${ifc}" status 2>/dev/null |
+		jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)
+	[ -n "$ip" ] || ip=$(jsonfilter -e '@["ipv4-address"][0].address' \
+		<<EOF
+$(ubus call "network.interface.${ifc}" status 2>/dev/null)
+EOF
+)
+	echo "$ip"
+}
+
+# ---------- 在线探测 ----------
+# 返回 0=在线 1=需登录（探针被劫持） 2=探测不通（没路由/门户不通）
+online() {
+	local url body rc
+	url=$(c probe_url)
+	[ -n "$url" ] || url='http://connect.rom.miui.com/generate_204'
+	body=$(uclient-fetch -q -O - -T 8 "$url" 2>/dev/null)
+	rc=$?
+	# 连不上 → 不是"在线"，也不算被劫持
+	[ "$rc" -ne 0 ] && return 2
+	# 204 探针正常时 body 为空
+	[ -z "$body" ] && return 0
+	echo "$body" | grep -qiE 'eportal|portal\.htm|login|NextURL|锐捷|认证' && return 1
+	return 0
+}
+
+# ---------- 拼登录 URL（拆出来便于离线自测：ybu-login url） ----------
+build_url() {
+	local ip acct pw prefix portal ts mac
+	ip=$(wan_ip)
+	[ -n "$ip" ] || ip='0.0.0.0'
+	acct=$(c account)
+	pw=$(c password)
+	[ "$(c password_base64)" = "1" ] && pw=$(b64 "$pw")
+	prefix=$(c account_prefix)
+	portal=$(c portal)
+	[ -n "$portal" ] || portal='http://10.10.252.1:801/eportal/'
+	# 门户认 MAC 时不带冒号、小写；没配就沿用原脚本的 12 个 0
+	mac=$(c wan_mac | tr -d ':' | tr 'A-F' 'a-f')
+	[ -n "$mac" ] || mac='000000000000'
+	ts=$(date +%s)
+	printf '%s' "${portal}?c=Portal&a=login&callback=dr${ts}000&login_method=1&user_account=${prefix}${acct}&user_password=${pw}&wlan_user_ip=${ip}&wlan_user_ipv6=&wlan_user_mac=${mac}&wlan_ac_ip=&wlan_ac_name=&jsVersion=3.1&_=${ts}000"
+}
+
+# ---------- 登录 ----------
+login() {
+	local ip url resp
+	ip=$(wan_ip)
+	if [ -z "$ip" ]; then
+		log "WAN 没有 IPv4 地址，无法登录（先解决 DHCP/网关）"
+		return 2
+	fi
+	if [ -z "$(c account)" ]; then
+		log "未配置 ybu.main.account，跳过登录"
+		return 2
+	fi
+	url=$(build_url)
+	resp=$(uclient-fetch -q -O - -T 12 "$url" 2>/dev/null)
+	log "login($ip) => ${resp:-<空响应>}"
+	echo "$resp" | grep -q '"result":"1"'
+}
+
+# MAC 相关：看当前 WAN 网卡真实 MAC、uci 里配的克隆目标、以及门户要的写法
+show_mac() {
+	local want real ifc dev
+	ifc=$(c interface); [ -n "$ifc" ] || ifc=wan
+	want=$(c wan_mac)
+	dev=$(ubus call "network.interface.${ifc}" status 2>/dev/null |
+		jsonfilter -e '@["l3_device"]' 2>/dev/null)
+	# 接口还没起来时 l3_device 为空，退回 uci 里的 device（如 eth0.1）
+	[ -n "$dev" ] || dev=$(uci -q get "network.${ifc}.device")
+	[ -n "$dev" ] || dev=eth0.1
+	real=$(cat "/sys/class/net/${dev}/address" 2>/dev/null)
+	echo "WAN 设备      : $dev"
+	echo "克隆目标(uci) : ${want:-<未设置>}"
+	echo "网卡实际 MAC  : ${real:-<未知>}"
+	echo "门户 mac 参数 : $(c wan_mac | tr -d ':' | tr 'A-F' 'a-f')"
+	if [ -n "$want" ] && [ -n "$real" ]; then
+		if [ "$(echo "$want" | tr 'A-F' 'a-f')" = "$(echo "$real" | tr 'A-F' 'a-f')" ]; then
+			echo "状态          : 已生效"
+		else
+			echo "状态          : 未生效（reload 或 reboot 后生效）"
+		fi
+	fi
+}
+
+status() {
+	local ip st
+	ip=$(wan_ip)
+	echo "接口   : $(c interface)"
+	echo "WAN IP : ${ip:-<无>}"
+	echo "账号   : $(c account)"
+	echo "门户   : $(c portal)"
+	echo "探测   : $(c probe_url)"
+	online; st=$?
+	case $st in
+		0) echo "在线   : 是" ;;
+		1) echo "在线   : 否（探针被门户劫持，需要登录）" ;;
+		*) echo "在线   : 未知（探测请求发不出去，检查 WAN）" ;;
+	esac
+}
+
+daemon() {
+	local interval st
+	interval=$(c interval)
+	[ -n "$interval" ] || interval=60
+	log "守护启动，探测间隔 ${interval}s"
+	while :; do
+		online; st=$?
+		if [ "$st" -ne 0 ]; then
+			if login; then
+				log "登录成功"
+			else
+				log "登录失败（探测状态 $st），${interval}s 后重试"
+			fi
+		fi
+		sleep "$interval"
+	done
+}
+
+case "$1" in
+	login)  login; exit $? ;;
+	check)  online; case $? in 0) echo online ;; 1) echo offline ;; *) echo unknown ;; esac ;;
+	status) status ;;
+	url)    build_url ;;
+	mac)    show_mac ;;
+	b64)    b64 "$2"; exit $? ;;          # 自测用
+	daemon|"") daemon ;;
+	*) echo "用法: $0 {daemon|login|check|status|url|mac|b64}" >&2; exit 1 ;;
+esac

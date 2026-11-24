@@ -1,0 +1,18 @@
+config main 'main'
+	# 总开关：0 时 start() 只建空链，不生效任何规则
+	option enabled '1'
+	# LAN 侧接口（dns 劫持 / ntp 重定向只对这个口进来的包生效）
+	option lan_iface 'br-lan'
+
+	# 1 = 把客户端的 53 全部劫持到本地 dnsmasq（收敛 resolver 指纹）
+	option dns_hijack '1'
+	# 1 = 封 853（DoT），防止绕过上面的劫持
+	option block_dot '1'
+	# 1 = 客户端 123 重定向到本地 ntpd
+	option block_ntp '1'
+	# 1 = 本地 ntpd 对外提供服务（重定向才有着落）
+	option ntp_local '1'
+	# 1 = POSTROUTING 把 TTL 统一成 64（xt_HL，iptables-mod-ipopt 已装）
+	option ttl_unify '1'
+	# 1 = Flash/AC 注入特征拦截（需要 iptables-mod-filter，默认关）
+	option ac_probe '0'

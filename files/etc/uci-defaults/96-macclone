@@ -1,0 +1,29 @@
+#!/bin/sh
+# WAN 口 MAC 克隆。
+#
+# 把 WAN 的 MAC 改成 ybu.main.wan_mac 指定的值，这样门户看到的就是
+# "你 PC 的 MAC"，从而复用 PC 已有的认证/无感知记录。
+#
+# 用法（刷完机在设备上执行，然后重启一次）：
+#   uci set ybu.main.wan_mac='AA:BB:CC:DD:EE:FF'
+#   uci commit ybu
+#   reboot
+#
+# 注意：MAC 只认第一次认证时绑定的那个；改完必须重启让 netifd 重设网卡地址。
+
+MAC=$(uci -q get ybu.main.wan_mac)
+
+[ -n "$MAC" ] || exit 0
+
+case "$MAC" in
+	*:*:*:*:*:*) ;;
+	*) exit 0 ;;
+esac
+
+current=$(uci -q get network.wan.macaddr)
+if [ "$current" != "$MAC" ]; then
+	uci -q set network.wan.macaddr="$MAC"
+	uci -q commit network
+	logger -t macclone "WAN MAC -> $MAC（重启后生效）"
+fi
+exit 0
