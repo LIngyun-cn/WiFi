@@ -209,6 +209,21 @@ LuCI → **状态 → 反检测状态**（`/cgi-bin/luci/admin/status/ganyu`）�
 `sing-box`/`v2ray`/`xray`（十几 MB 的 Go 二进制，正是 UA3F 翻车的那个坑）、
 `zerotier`、`aria2`（3A 没有 USB）、`samba4`。
 
+## 指纹补丁：四条"实测过才知道"的漏洞
+
+这些不是拍脑袋加的，都是把 `nft list table inet ua2f` / `ps w | grep udhcpc` /
+`netstat -lntp` 摊开看之后发现的真漏点。
+
+| 漏点 | 现场证据 | 修法 |
+|---|---|---|
+| **校内 HTTP 的 UA 根本没改** | `nft list table inet ua2f` 里 `ip daddr @localaddr_v4 counter packets 251132 bytes 216422578 return`；`localaddr_v4` 硬编码了 `10.0.0.0/8`，而校园网就是 `10.126.0.0/20`（`ip route` 可见）。访问教务/门户等校内 http 站点时 UA 原样出网——而校方最方便查多设备的地方恰恰是自己网关 | `files/etc/init.d/ua2f` 把 `10.0.0.0/8` 从 `localaddr_v4` 摘掉（保留 `192.168.0.0/16` 让自家 LAN 不被改写） |
+| **DHCP 自曝 `OpenWrt`** | `ps w \| grep udhcpc` → `-x hostname:OpenW`。`/lib/netifd/proto/dhcp.sh:48` 在没配 hostname 时拿 `/proc/sys/kernel/hostname` 兜底，于是 option 12 = `OpenWrt`，全校唯一一台这么自报的设备 | `files/etc/uci-defaults/89-wan-hostname` 把 `system.hostname` + `network.wan.hostname` 都改成普通机器名（默认 `DESKTOP-5G4QQFQ`），并顺手 `echo > /proc/sys/kernel/hostname` |
+| **管理面监听 `0.0.0.0`** | `netstat -lntp` → uhttpd `0.0.0.0:80`/`[::]:443`、dropbear `0.0.0.0:22`。靠 fw4 的 wan `input=REJECT` 挡着，但 fw4 reload 一出错就整排摆在校园网里 | `files/etc/uci-defaults/88-bindlan`：uhttpd 绑 `192.168.1.1`、dnsmasq `interface=lan`+`notinterface=wan`、dropbear `Interface=lan` |
+| **固定 60s 心跳** | ybu-login 每 60 秒准点探测 `gstatic/generate_204`，全网唯一节奏 | `files/usr/bin/ybu-login` 守护循环加 ±15% 抖动（`awk` 生成，不依赖 `$RANDOM`） |
+
+还有两条**明确不做**：TLS 的 JA3/JA3S（逐设备不同，除非 MITM 给每台设备装根证书，App pinning 必炸）、
+TCP 窗口/wscale/ISN（改了会破坏流控与序列号，收益远小于风险）。
+
 ## 已知限制
 
 - 首次构建要下 ~1.5 GB 源码包，`dl/` 会走 Actions 缓存（key `ow-dl-24.10.8-<run_id>`）

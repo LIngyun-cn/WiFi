@@ -383,6 +383,7 @@ jobs:
                    etc/init.d/ganyu-guard etc/config/ganyu etc/uci-defaults/97-ganyu etc/uci-defaults/98-wan-sta \
                    usr/bin/ganyu-status \
                    etc/uci-defaults/94-bbr etc/uci-defaults/92-packfix \
+                   etc/uci-defaults/88-bindlan etc/uci-defaults/89-wan-hostname \
                    usr/share/luci/menu.d/luci-app-ganyu.json \
                    usr/share/rpcd/acl.d/luci-app-ganyu.json \
                    www/luci-static/resources/view/ganyu/status.js; do
@@ -397,7 +398,7 @@ jobs:
           # 两个自编内核模块必须落进 /lib/modules
           ls "$ROOT/lib/modules/6.6.144/rkp-ipid.ko" >/dev/null 2>&1 || { echo 'rootfs 里没有 rkp-ipid.ko'; exit 1; }
           ls "$ROOT/lib/modules/6.6.144/tcpts-strip.ko" >/dev/null 2>&1 || { echo 'rootfs 里没有 tcpts-strip.ko'; exit 1; }
-          for f in etc/init.d/ganyu-guard etc/init.d/ybu-login usr/bin/ybu-login etc/init.d/ua2f etc/uci-defaults/93-ua2f etc/uci-defaults/98-wan-sta usr/bin/ganyu-status etc/uci-defaults/94-bbr etc/uci-defaults/92-packfix; do
+          for f in etc/init.d/ganyu-guard etc/init.d/ybu-login usr/bin/ybu-login etc/init.d/ua2f etc/uci-defaults/93-ua2f etc/uci-defaults/98-wan-sta usr/bin/ganyu-status etc/uci-defaults/94-bbr etc/uci-defaults/92-packfix etc/uci-defaults/88-bindlan etc/uci-defaults/89-wan-hostname; do
             test -x "$ROOT/$f" || { echo "$f 没有可执行位"; exit 1; }
           done
 
@@ -417,6 +418,20 @@ jobs:
             echo '92-packfix 里没有停用 https-dns-proxy 的逻辑'; exit 1; }
           grep -q 'mwan3' "$ROOT/etc/uci-defaults/92-packfix" || {
             echo '92-packfix 里没有停用 mwan3 的逻辑'; exit 1; }
+
+          # 指纹补丁四条：管理面绑 br-lan、DHCP hostname 不再叫 OpenWrt、
+          # ua2f 不再整段跳过 10.0.0.0/8（校园网就在这段里，跳了等于校内 HTTP 的 UA 原样出网）、
+          # 门户心跳带抖动（固定 60s 准点探测本身就是节奏指纹）
+          grep -q 'listen_http' "$ROOT/etc/uci-defaults/88-bindlan" || {
+            echo '88-bindlan 里没有把 uhttpd 绑到 br-lan'; exit 1; }
+          grep -q 'network.wan.hostname' "$ROOT/etc/uci-defaults/89-wan-hostname" || {
+            echo '89-wan-hostname 里没有设置 DHCP hostname'; exit 1; }
+          if grep -q '0.0.0.0/8, 10.0.0.0/8' "$ROOT/etc/init.d/ua2f"; then
+            echo '::error::ua2f 的 localaddr_v4 仍包含 10.0.0.0/8，校内 HTTP 的 UA 不会被改写'
+            exit 1
+          fi
+          grep -q 'rand()' "$ROOT/usr/bin/ybu-login" || {
+            echo 'ybu-login 的守护循环没有加抖动'; exit 1; }
 
           # 三个断言：ua2f 用的是我们改过的配置（不是包自带默认）、init 走的是 NFQUEUE 而不是 iptables 老路、
           # 而且 ua3f 那种"装了但跑不动"的包这次真的不该再出现在镜像里

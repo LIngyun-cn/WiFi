@@ -1,0 +1,23 @@
+#!/bin/sh
+# 抹掉 DHCP 自曝的路由器指纹。
+#
+# netifd 的 dhcp 协议在没配 hostname 时会拿 /proc/sys/kernel/hostname 兜底
+# （/lib/netifd/proto/dhcp.sh 第 48 行：hostname="$(cat /proc/sys/kernel/hostname)"），
+# 于是 udhcpc 出网就带 -x hostname:OpenWrt —— 校园网 DHCP 服务器/网关拿到
+# option 12 = "OpenWrt"，全校唯一一台这么自报的设备，等于自己举牌"我是路由器"。
+#
+# 这里把 system hostname 与 wan 的 DHCP hostname 都换成普通机器名。
+# 需要换名字就改这一行，或者直接 uci set network.wan.hostname=xxx 覆盖。
+
+HN='DESKTOP-5G4QQFQ'
+
+uci -q set system.@system[0].hostname="$HN"
+uci -q set network.wan.hostname="$HN"
+uci -q commit system
+uci -q commit network
+
+# uci 里的 system.hostname 要下次开机才落到内核，这里顺手把当前内核主机名也改了，
+# 免得任何一个走 /proc/sys/kernel/hostname 的组件（比如 netifd 的 dhcp 兜底）还看到 OpenWrt
+echo "$HN" > /proc/sys/kernel/hostname 2>/dev/null || true
+
+exit 0

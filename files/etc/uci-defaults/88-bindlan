@@ -1,0 +1,25 @@
+#!/bin/sh
+# 管理面只绑 br-lan。
+#
+# 现状是靠 fw4 的 wan zone input=REJECT 挡着，功能上安全；但 uhttpd/dropbear/dnsmasq
+# 默认监听 0.0.0.0 与 [::]，只要哪天 fw4 reload 失败、或切到 wired 模式后规则没跟上，
+# 22/80/443/53 就整整齐齐摆在校园网里，等于自报"这里有台路由器"。
+# 绑到 192.168.1.1 以后，即使防火墙出事，校园网侧也连不上来。
+
+uci -q set uhttpd.main.listen_http='192.168.1.1:80'
+uci -q set uhttpd.main.listen_https='192.168.1.1:443'
+uci -q commit uhttpd
+
+uci -q set dhcp.@dnsmasq[0].interface='lan'
+uci -q set dhcp.@dnsmasq[0].notinterface='wan'
+uci -q commit dhcp
+
+# dropbear 的 Interface 选项只在启动时读取，这里只写配置，重启后生效
+# （不 restart，避免初次启动时把正在用的会话掐掉）
+uci -q set dropbear.@dropbear[0].Interface='lan'
+uci -q commit dropbear
+
+/etc/init.d/uhttpd restart
+/etc/init.d/dnsmasq restart
+
+exit 0
