@@ -87,6 +87,27 @@ online() {
 	return 0
 }
 
+# ---------- 取 WAN 接口的真实 MAC（无冒号、小写） ----------
+# 没配克隆时门户参数必须给这个，而不是 000000000000：
+# 学校按 MAC 认终端，"12 个 0" 会被当成未知设备，既不利于排查，也可能触发风控。
+wan_iface() {
+	local ifc dev
+	ifc=$(c interface)
+	[ -n "$ifc" ] || ifc=wan
+	dev=$(ubus call "network.interface.${ifc}" status 2>/dev/null |
+		jsonfilter -e '@["l3_device"]' 2>/dev/null)
+	# 接口还没起来时 l3_device 为空，退回 uci 里的 device（如 eth0.1）
+	[ -n "$dev" ] || dev=$(uci -q get "network.${ifc}.device")
+	[ -n "$dev" ] || dev=eth0.1
+	printf '%s' "$dev"
+}
+
+wan_iface_mac() {
+	local dev
+	dev=$(wan_iface)
+	cat "/sys/class/net/${dev}/address" 2>/dev/null | tr -d ':' | tr 'A-F' 'a-f'
+}
+
 # ---------- 拼登录 URL（拆出来便于离线自测：ybu-login url） ----------
 build_url() {
 	local ip acct pw prefix portal ts mac
@@ -98,8 +119,9 @@ build_url() {
 	prefix=$(c account_prefix)
 	portal=$(c portal)
 	[ -n "$portal" ] || portal='http://10.10.252.1:801/eportal/'
-	# 门户认 MAC 时不带冒号、小写；没配就沿用原脚本的 12 个 0
+	# 门户认 MAC 时不带冒号、小写：配了克隆就用克隆目标，没配就用 WAN 网卡自己的 MAC
 	mac=$(c wan_mac | tr -d ':' | tr 'A-F' 'a-f')
+	[ -n "$mac" ] || mac=$(wan_iface_mac)
 	[ -n "$mac" ] || mac='000000000000'
 	ts=$(date +%s)
 	printf '%s' "${portal}?c=Portal&a=login&callback=dr${ts}000&login_method=1&user_account=${prefix}${acct}&user_password=${pw}&wlan_user_ip=${ip}&wlan_user_ipv6=&wlan_user_mac=${mac}&wlan_ac_ip=&wlan_ac_name=&jsVersion=3.1&_=${ts}000"
@@ -125,25 +147,24 @@ login() {
 
 # MAC 相关：看当前 WAN 网卡真实 MAC、uci 里配的克隆目标、以及门户要的写法
 show_mac() {
-	local want real ifc dev
-	ifc=$(c interface); [ -n "$ifc" ] || ifc=wan
+	local want real dev macarg
 	want=$(c wan_mac)
-	dev=$(ubus call "network.interface.${ifc}" status 2>/dev/null |
-		jsonfilter -e '@["l3_device"]' 2>/dev/null)
-	# 接口还没起来时 l3_device 为空，退回 uci 里的 device（如 eth0.1）
-	[ -n "$dev" ] || dev=$(uci -q get "network.${ifc}.device")
-	[ -n "$dev" ] || dev=eth0.1
+	dev=$(wan_iface)
 	real=$(cat "/sys/class/net/${dev}/address" 2>/dev/null)
+	macarg=$(c wan_mac | tr -d ':' | tr 'A-F' 'a-f')
+	[ -n "$macarg" ] || macarg=$(wan_iface_mac)
 	echo "WAN 设备      : $dev"
-	echo "克隆目标(uci) : ${want:-<未设置>}"
+	echo "克隆目标(uci) : ${want:-<未设置，用网卡自己的 MAC>}"
 	echo "网卡实际 MAC  : ${real:-<未知>}"
-	echo "门户 mac 参数 : $(c wan_mac | tr -d ':' | tr 'A-F' 'a-f')"
+	echo "门户 mac 参数 : ${macarg:-<未知>}"
 	if [ -n "$want" ] && [ -n "$real" ]; then
 		if [ "$(echo "$want" | tr 'A-F' 'a-f')" = "$(echo "$real" | tr 'A-F' 'a-f')" ]; then
 			echo "状态          : 已生效"
 		else
 			echo "状态          : 未生效（reload 或 reboot 后生效）"
 		fi
+	else
+		echo "状态          : 未克隆（这台路由器自己占一个校园网名额）"
 	fi
 }
 
