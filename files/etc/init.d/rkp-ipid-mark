@@ -9,45 +9,64 @@
 #     而这些包恰恰是被检测的对象。
 #   * 顺手关掉 flow offloading —— 软件/硬件 NAT 加速会让包绕过 POST_ROUTING
 #     hook，rkp-ipid 直接失效。
+#
+# ★ 千万不要定义 USE_PROCD（哪怕是 0）：
+#   /etc/rc.common 第 121 行是 `[ -n "$USE_PROCD" ] && { ... }`，
+#   只判非空、不看值，任何非空值都会切进 procd 模式并覆盖本脚本的
+#   start()/stop()，结果 start() 变成 start_service 的空壳，
+#   规则一条都不建（v3 固件就是这么静默失效的）。
 
 START=99
 STOP=10
-USE_PROCD=0
 
 CHAIN=IPID_MOD
 MARK=0x10/0x10
 
 ipt() {
-	iptables -t mangle "$@" 2>/dev/null
+	iptables -t mangle "$@" || logger -t rkp-ipid "WARN: iptables -t mangle $* failed (rc=$?)"
+}
+
+chain_exists() {
+	iptables -t mangle -L "$CHAIN" -n >/dev/null 2>&1
+}
+
+jump_exists() {
+	iptables -t mangle -C "$1" -j "$CHAIN" >/dev/null 2>&1
 }
 
 rules_up() {
-	ipt -N "$CHAIN"
+	chain_exists || ipt -N "$CHAIN"
 	ipt -F "$CHAIN"
 
 	# 这些网段的 IPID 不用管（注意：故意没有 10.0.0.0/8）
-	ipt -A "$CHAIN" -d 0.0.0.0/8     -j RETURN
-	ipt -A "$CHAIN" -d 127.0.0.0/8   -j RETURN
-	ipt -A "$CHAIN" -d 172.16.0.0/12 -j RETURN
+	ipt -A "$CHAIN" -d 0.0.0.0/8      -j RETURN
+	ipt -A "$CHAIN" -d 127.0.0.0/8    -j RETURN
+	ipt -A "$CHAIN" -d 172.16.0.0/12  -j RETURN
 	ipt -A "$CHAIN" -d 192.168.0.0/16 -j RETURN
-	ipt -A "$CHAIN" -d 255.0.0.0/8   -j RETURN
+	ipt -A "$CHAIN" -d 255.0.0.0/8    -j RETURN
 
 	ipt -A "$CHAIN" -j MARK --set-xmark "$MARK"
 
 	# 挂到 OUTPUT 和 FORWARD 上，幂等
-	iptables -t mangle -C OUTPUT  -j "$CHAIN" 2>/dev/null || ipt -A OUTPUT  -j "$CHAIN"
-	iptables -t mangle -C FORWARD -j "$CHAIN" 2>/dev/null || ipt -A FORWARD -j "$CHAIN"
+	for c in OUTPUT FORWARD; do
+		jump_exists "$c" || ipt -A "$c" -j "$CHAIN"
+	done
 }
 
 rules_down() {
-	ipt -D OUTPUT  -j "$CHAIN"
-	ipt -D FORWARD -j "$CHAIN"
-	ipt -F "$CHAIN"
-	ipt -X "$CHAIN"
+	for c in OUTPUT FORWARD; do
+		while jump_exists "$c"; do
+			ipt -D "$c" -j "$CHAIN"
+		done
+	done
+	if chain_exists; then
+		ipt -F "$CHAIN"
+		ipt -X "$CHAIN"
+	fi
 }
 
 kill_offload() {
-	uci -q get firewall.@defaults[0] >/dev/null || return 0
+	uci -q get firewall.@defaults[0] >/dev/null 2>&1 || return 0
 	uci -q set firewall.@defaults[0].flow_offloading='0'
 	uci -q set firewall.@defaults[0].flow_offloading_hw='0'
 	uci -q commit firewall
@@ -56,7 +75,7 @@ kill_offload() {
 start() {
 	kill_offload
 	rules_up
-	logger -t rkp-ipid "mangle mark $MARK installed (flow offloading off)"
+	logger -t rkp-ipid "mark rules up: OUTPUT/FORWARD -> $CHAIN, MARK $MARK, flow offloading off"
 }
 
 stop() {
