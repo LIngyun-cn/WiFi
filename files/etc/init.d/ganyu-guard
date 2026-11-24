@@ -130,13 +130,32 @@ rules_down() {
 }
 
 # 重定向到本地 123 才有意义
+#
+# 另外把 NTP 上游换成国内源。道理很直接：所有"按时间比对"的检测（时钟偏移、
+# 证书/HTTP Date 与包时间不符）都建立在路由器自己时钟准确的前提上；而
+# *.openwrt.pool.ntp.org 在国内经常解析失败或超时，时钟一歪反而更容易被抓。
+# 只在仍是默认池时才改，用户自定义过就不动。
 ensure_ntpserver() {
 	on ntp_local || return 0
-	[ "$(uci -q get system.ntp.enable_server)" = "1" ] && return 0
-	uci -q set system.ntp.enable_server='1'
-	uci -q commit system
-	/etc/init.d/sysntpd reload 2>/dev/null || /etc/init.d/sysntpd restart 2>/dev/null
-	log "system.ntp.enable_server=1 并重启 ntpd"
+
+	if [ "$(uci -q get system.ntp.enable_server)" != "1" ]; then
+		uci -q set system.ntp.enable_server='1'
+		uci -q commit system
+		/etc/init.d/sysntpd reload 2>/dev/null || /etc/init.d/sysntpd restart 2>/dev/null
+		log "system.ntp.enable_server=1 并重启 ntpd"
+	fi
+
+	case "$(uci -q get system.ntp.server)" in
+	*openwrt.pool.ntp.org*)
+		uci -q delete system.ntp.server
+		for s in ntp.aliyun.com time1.cloud.tencent.com cn.pool.ntp.org stdtime.gov.hk; do
+			uci -q add_list system.ntp.server="$s"
+		done
+		uci -q commit system
+		/etc/init.d/sysntpd reload 2>/dev/null || /etc/init.d/sysntpd restart 2>/dev/null
+		log "NTP 上游换成国内源：$(uci -q get system.ntp.server)"
+		;;
+	esac
 }
 
 start() {
