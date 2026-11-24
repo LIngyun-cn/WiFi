@@ -49,6 +49,11 @@ env:
   IMG_MAX: '15204352'
   SRC: ${{ github.workspace }}/openwrt-src
   DL_CACHE: ${{ github.workspace }}/.dl-cache
+  # 编译缓存（staging_dir + build_dir 共 2GB）开关。默认关：
+  # run #31 命中缓存后仍然 `ERROR: toolchain/binutils failed to build.`（V=0 下不留任何原因），
+  # 与 run 45193093967 同一症状。冷编译（run 45163576686 / 45182680955）两次都干净通过，
+  # 所以先用「不带缓存、稳定出片」这条路把固件拿到手；要提速再把这里改回 '1' 继续排查。
+  USE_FULL_CACHE: '0'
 
 jobs:
   build:
@@ -103,6 +108,7 @@ jobs:
       # 直接 `ERROR: toolchain/binutils failed to build.`。两者同源同 key 保存才不会错配。
       - name: 恢复编译缓存 (staging_dir + build_dir)
         id: full-cache
+        if: env.USE_FULL_CACHE == '1'
         uses: actions/cache/restore@v4
         with:
           path: |
@@ -115,7 +121,7 @@ jobs:
       - name: 缓存一致性检查
         # 注意：cache-hit 只在 key 精确命中时才是 true；用 restore-keys 前缀命中
         # 时它是 false，缓存其实已经恢复了。判断"有没有恢复"要用 cache-matched-key。
-        if: steps.full-cache.outputs.cache-matched-key != ''
+        if: env.USE_FULL_CACHE == '1' && steps.full-cache.outputs.cache-matched-key != ''
         run: |
           set -euo pipefail
           cd "$SRC"
@@ -339,7 +345,9 @@ jobs:
         run: |
           set -o pipefail
           cd "$SRC"
-          make -j"$(($(nproc)+1))" 2>&1 | tee build.log
+          # 用 nproc 而不是 nproc+1：4 核上多开一个 job 换来的是内存峰值上去
+          # （binutils / ld 单进程就能吃几个 GB），这机器只有 16GB。
+          make -j"$(nproc)" 2>&1 | tee build.log
 
       - name: 失败时打印错误现场
         if: failure()
@@ -368,6 +376,22 @@ jobs:
           # V=0 下 package/install 失败可能一个字都不打（只留一行 world failed），
           # 这里用 V=s 单线程重跑收包阶段，把真正的 opkg 报错逼出来
           timeout 600 make -j1 V=s package/install 2>&1 | tail -n 250 || true
+
+      - name: 失败时复现工具链错误
+        # run #31 与 run 45193093967 都是 `ERROR: toolchain/binutils failed to build.`
+        # 而 V=0 的 build.log 里没有任何编译输出，必须用 V=s 单线程重跑才看得到真因。
+        if: failure()
+        run: |
+          cd "$SRC"
+          if grep -q 'toolchain/binutils failed to build' build.log 2>/dev/null; then
+            echo '===== 命中 binutils 失败，V=s 单线程重跑 ====='
+            free -m || true
+            timeout 900 make -j1 V=s toolchain/binutils/compile 2>&1 | tail -n 200 || true
+            echo '===== 磁盘 ====='
+            df -h / || true
+          else
+            echo '不是 binutils 失败，跳过'
+          fi
 
       - name: 校验产物
         run: |
@@ -564,7 +588,7 @@ jobs:
 
       - name: 提交编译缓存
         # 只有"这次没恢复到缓存"且编译成功才存，避免把失败现场的残缺 staging_dir 存成毒缓存
-        if: success() && steps.full-cache.outputs.cache-matched-key == ''
+        if: env.USE_FULL_CACHE == '1' && success() && steps.full-cache.outputs.cache-matched-key == ''
         uses: actions/cache/save@v4
         with:
           path: |
