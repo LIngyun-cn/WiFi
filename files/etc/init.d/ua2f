@@ -423,7 +423,7 @@ setup_firewall() {
 
 					tcp dport 22 counter return comment "!ua2f: bypass SSH";
 					$([ "$handle_tls" -eq "1" ] || echo 'tcp dport 443 counter return comment "!ua2f: bypass HTTPS";')
-					$([ "$disable_connmark" -eq "1" ] || echo 'tcp dport 80 counter ct mark set 44;')
+					$([ "$disable_connmark" -eq "1" ] || echo 'tcp dport { 80, 8080 } counter ct mark set 44;')
 					$([ "$disable_connmark" -eq "1" ] || echo 'ct mark 43 counter return comment "!ua2f: bypass non-http stream";')
 					meta l4proto tcp ct direction original counter $nfqueue_expr;
 				}

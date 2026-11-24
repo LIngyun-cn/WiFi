@@ -209,7 +209,7 @@ LuCI → **状态 → 反检测状态**（`/cgi-bin/luci/admin/status/ganyu`）�
 `sing-box`/`v2ray`/`xray`（十几 MB 的 Go 二进制，正是 UA3F 翻车的那个坑）、
 `zerotier`、`aria2`（3A 没有 USB）、`samba4`。
 
-## 指纹补丁：四条"实测过才知道"的漏洞
+## 指纹补丁：九条"实测过才知道"的漏洞
 
 这些不是拍脑袋加的，都是把 `nft list table inet ua2f` / `ps w | grep udhcpc` /
 `netstat -lntp` 摊开看之后发现的真漏点。
@@ -220,9 +220,19 @@ LuCI → **状态 → 反检测状态**（`/cgi-bin/luci/admin/status/ganyu`）�
 | **DHCP 自曝 `OpenWrt`** | `ps w \| grep udhcpc` → `-x hostname:OpenW`。`/lib/netifd/proto/dhcp.sh:48` 在没配 hostname 时拿 `/proc/sys/kernel/hostname` 兜底，于是 option 12 = `OpenWrt`，全校唯一一台这么自报的设备 | `files/etc/uci-defaults/89-wan-hostname` 把 `system.hostname` + `network.wan.hostname` 都改成普通机器名（默认 `DESKTOP-5G4QQFQ`），并顺手 `echo > /proc/sys/kernel/hostname` |
 | **管理面监听 `0.0.0.0`** | `netstat -lntp` → uhttpd `0.0.0.0:80`/`[::]:443`、dropbear `0.0.0.0:22`。靠 fw4 的 wan `input=REJECT` 挡着，但 fw4 reload 一出错就整排摆在校园网里 | `files/etc/uci-defaults/88-bindlan`：uhttpd 绑 `192.168.1.1`、dnsmasq `interface=lan`+`notinterface=wan`、dropbear `Interface=lan` |
 | **固定 60s 心跳** | ybu-login 每 60 秒准点探测 `gstatic/generate_204`，全网唯一节奏 | `files/usr/bin/ybu-login` 守护循环加 ±15% 抖动（`awk` 生成，不依赖 `$RANDOM`） |
+| **WAN MAC 是小米 OUI** | `cat /sys/class/net/eth0/address` → `50:64:2b:c1:00:55`。网关瞄一眼前缀就知道链路上挂的是小米路由器，比任何协议指纹都直接 | `files/etc/uci-defaults/96-macclone`：没指定 `ybu.main.wan_mac` 时自动生成一个 Intel OUI（`3c:a9:f4`）的 MAC 并写进 uci（重启后固定），同时写 `network.wan.macaddr` 与 `wireless.wan_sta.macaddr` |
+| **DHCP 不发 vendor-class** | 真 Windows 的 DISCOVER 带 option 60 = `MSFT 5.0`、option 55 是固定顺序的一串；busybox udhcpc 默认一个都不发 | `files/etc/uci-defaults/86-wan-dhcp`：`vendorid=MSFT 5.0`、`defaultreqopts=0`、`reqopts` 换成 Windows 10/11 的清单（1 3 6 15 31 33 43 44 46 47 119 121 249 252） |
+| **DoH 绕过 53 劫持** | 客户端用 `dns.google`/`cloudflare-dns.com` 走 443，网关看不到查询内容，等于绕过 DNS 收敛 | `files/etc/init.d/ganyu-guard` 的 `block_doh`：nft `post` 链里封已知公共 DoH IP 的 443（tcp+udp）；另加 dnsmasq canary `use-application-dns.net` → NXDOMAIN，让 Firefox 自动关 DoH |
+| **路由器的 DNS/NTP 服务对外可达** | `netstat -lnup` → `:::123`（ntpd `-l` 全接口）、`10.126.118.213:53`（dnsmasq 绑到 WAN 地址）。现在只靠 fw4 的 wan `input=REJECT` 挡着 | ganyu 表里加 `gin`（input 钩子）：`iifname { "lo", "br-lan" } accept`，其余来源的 udp 53/123 直接 drop。**必须放行 lo**，否则路由器自己也解析不了 |
+| **只在 80 上改 UA** | 校内站点/代理也常见 8080 | `files/etc/init.d/ua2f` 的 nft 规则 `tcp dport { 80, 8080 } ct mark set 44` |
 
 还有两条**明确不做**：TLS 的 JA3/JA3S（逐设备不同，除非 MITM 给每台设备装根证书，App pinning 必炸）、
 TCP 窗口/wscale/ISN（改了会破坏流控与序列号，收益远小于风险）。
+
+还有一条**改配置解决不了、只能改拓扑**的：现在 WAN 走的是 `phy1-sta0`（无线 STA 连校园网 `YBU`），
+校园的 AP 因此能直接看到我们 802.11 关联层的全部能力集 —— 支持速率集、HT/VHT capabilities、
+扩展能力位，一眼就是 Linux `mac80211`，和手机/笔记本完全不同。**插网线走
+`ybu-login mode wired` 就能整块抹掉**，这也是为什么有线模式比无线模式干净得多。
 
 ## 已知限制
 

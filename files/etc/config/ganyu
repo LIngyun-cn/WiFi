@@ -8,6 +8,14 @@ config main 'main'
 	option dns_hijack '1'
 	# 1 = 封 853（DoT），防止绕过上面的劫持
 	option block_dot '1'
+	# 1 = 封已知公共 DoH 解析器的 443（Cloudflare/Google/Quad9/AdGuard/
+	#     OpenDNS）。DoH 把查询塞进 HTTPS，网关看不到内容，等于绕开上面的
+	#     53 劫持；封掉这些 IP 的 443 只是让"客户端想用 DoH"这条路走不通，
+	#     同一 IP 上的其它端口不受影响。
+	option block_doh '1'
+	# 1 = 封 UDP 443（QUIC / HTTP3）。默认关：网页会更慢一点（退回 TCP），
+	#     而它带来的收益只是"流量形态更一致"。想更严格可以打开。
+	option block_quic '0'
 	# 1 = 客户端 123 重定向到本地 ntpd
 	option block_ntp '1'
 	# 1 = 本地 ntpd 对外提供服务（重定向才有着落）

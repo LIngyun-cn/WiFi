@@ -26,6 +26,10 @@ CONF=ganyu
 TABLE=ganyu
 AC_CHAIN=GANYU_AC
 V6_CHAIN=drop6
+IN_CHAIN=gin
+
+# 已知的公共 DoH 解析器。只封这些 IP 的 443，不动其它端口。
+DOH_V4="1.1.1.1, 1.0.0.1, 8.8.8.8, 8.8.4.4, 9.9.9.9, 149.112.112.112, 94.140.14.14, 94.140.15.15, 208.67.222.222, 208.67.220.220"
 
 c() { uci -q get "${CONF}.main.$1"; }
 log() { logger -t ganyu-guard "$*"; }
@@ -50,6 +54,21 @@ rules_up() {
 	lan=$(c lan_iface)
 	[ -n "$lan" ] || lan=br-lan
 
+	# input 兜底：53 / 123 只对本机 loopback 与 LAN 开放。
+	# 原因：ntpd 在 enable_server=1 时用 `ntpd -n -N -l` 监听 :::123（全接口），
+	# dnsmasq 也会绑到 WAN 地址上；现在靠 fw4 的 wan zone input=REJECT 挡着，
+	# 但那是另一张表，只要有人动过防火墙就会漏出"这台设备在对外提供
+	# DNS/NTP 服务"这个特征。这里在 ganyu 表里再兜一层。
+	# 必须放行 lo —— 路由器自己的进程查 127.0.0.1:53 也从 input 走，
+	# 拦了它 = 路由器自己也解析不了（第一次部署就踩了：nslookup 全超时）。
+	if nft "add chain ip $TABLE $IN_CHAIN { type filter hook input priority filter; policy accept; }"; then
+		nft_run "add rule ip $TABLE $IN_CHAIN iifname { \"$lan\", \"lo\" } counter accept"
+		nft_run add rule ip "$TABLE" $IN_CHAIN udp dport 53 counter drop
+		nft_run add rule ip "$TABLE" $IN_CHAIN udp dport 123 counter drop
+	else
+		log "ERROR: 建 input 兜底链失败"
+	fi
+
 	if on dns_hijack; then
 		nft_run add rule ip "$TABLE" pre iifname "$lan" udp dport 53 counter redirect to :53
 		nft_run add rule ip "$TABLE" pre iifname "$lan" tcp dport 53 counter redirect to :53
@@ -69,6 +88,17 @@ rules_up() {
 	if on block_dot; then
 		nft_run add rule ip "$TABLE" post tcp dport 853 counter drop
 		log "block_dot: 853/tcp 已封"
+	fi
+
+	if on block_doh; then
+		nft_run "add rule ip $TABLE post ip daddr { $DOH_V4 } tcp dport 443 counter drop"
+		nft_run "add rule ip $TABLE post ip daddr { $DOH_V4 } udp dport 443 counter drop"
+		log "block_doh: 已知 DoH 解析器的 443 已封"
+	fi
+
+	if on block_quic; then
+		nft_run add rule ip "$TABLE" post udp dport 443 counter drop
+		log "block_quic: UDP 443（QUIC/HTTP3）已封"
 	fi
 
 	v6_rules
@@ -158,6 +188,19 @@ ensure_ntpserver() {
 	esac
 }
 
+# dnsmasq canary：Firefox 在启用 DoH 前会先查 use-application-dns.net，
+# 拿到 NXDOMAIN 就自动关掉 DoH。零成本，顺手做掉。
+ensure_canary() {
+	uci -q get dhcp.@dnsmasq[0] >/dev/null 2>&1 || return 0
+	if uci -q get dhcp.@dnsmasq[0].address 2>/dev/null | grep -q 'use-application-dns.net'; then
+		return 0
+	fi
+	uci -q add_list dhcp.@dnsmasq[0].address='/use-application-dns.net/'
+	uci -q commit dhcp
+	/etc/init.d/dnsmasq reload 2>/dev/null
+	log "canary: use-application-dns.net -> NXDOMAIN（Firefox 自动关 DoH）"
+}
+
 start() {
 	if [ "$(c enabled)" != "1" ]; then
 		rules_down
@@ -166,6 +209,7 @@ start() {
 	fi
 	rules_up
 	ensure_ntpserver
+	ensure_canary
 }
 
 stop() {
@@ -190,4 +234,7 @@ status() {
 	echo "== ntpd =="
 	echo "enable_server = $(uci -q get system.ntp.enable_server)"
 	ps w 2>/dev/null | grep -c '[n]tpd'
+	echo
+	echo "== dnsmasq canary =="
+	uci -q get dhcp.@dnsmasq[0].address 2>/dev/null || echo "（未设置）"
 }
