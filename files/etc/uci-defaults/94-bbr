@@ -1,0 +1,21 @@
+#!/bin/sh
+# 首次启动把拥塞控制换成 BBR（kmod-tcp-bbr）。
+#
+# 校园网这条链路丢包/延迟抖动明显，BBR 比默认 cubic 抗丢包得多，
+# 代价只有 6.6 KB 的一个模块。每一步都做了存在性判断：
+# 模块没打进固件、或内核没把 bbr 编进去时，脚本静默退出，不影响开机。
+
+modprobe tcp_bbr 2>/dev/null || true
+
+[ -r /proc/sys/net/ipv4/tcp_available_congestion_control ] || exit 0
+grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control || exit 0
+
+sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1 || exit 0
+
+# 写进 sysctl.conf 让后续每次开机也生效（uci-defaults 只跑一次）
+if [ -f /etc/sysctl.conf ] && ! grep -q '^net.ipv4.tcp_congestion_control=bbr' /etc/sysctl.conf; then
+	echo 'net.ipv4.tcp_congestion_control=bbr' >> /etc/sysctl.conf
+fi
+
+logger -t ganyu 'BBR 拥塞控制已启用'
+exit 0

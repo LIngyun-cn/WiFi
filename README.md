@@ -30,7 +30,7 @@ files/                                 根文件系统覆盖层
   etc/init.d/ganyu-guard               防检测：DNS 劫持 / NTP 归位 / TTL 统一 / DoT 封锁
   etc/init.d/ybu-login                 校园网锐捷门户自动登录
   etc/config/{ua2f,ganyu,ybu}          上面三者的配置
-  etc/uci-defaults/{90-rkp-ipid,93-ua2f,95-ybu,96-macclone,97-ganyu,98-wan-sta}
+  etc/uci-defaults/{90-rkp-ipid,93-ua2f,94-bbr,95-ybu,96-macclone,97-ganyu,98-wan-sta}
   usr/bin/ybu-login                    门户登录脚本本体
   usr/bin/ganyu-status                 反检测链路状态采集（纯文本，供 LuCI 页面调用）
   usr/share/luci/menu.d/luci-app-ganyu.json     状态页菜单项（状态 → 反检测状态）
@@ -49,11 +49,13 @@ files/                                 根文件系统覆盖层
    | `extra_packages` | 额外装进固件的包，空格分隔 | 中文三件套 + tcpdump/iperf3/mtr |
    | `remove_packages` | 要剔除的包，空格分隔（写 `# CONFIG_PACKAGE_x is not set`） | 空 |
 
-2. 等 50–70 分钟。构建会自己校验：
+2. 等 **35 分钟**左右（编译缓存命中时；冷启动首次约 60–70 分钟）。构建会自己校验：
    - `rkp-ipid.ko` 确实生成，并打印它的 `vermagic=`
    - rootfs 里有 `/usr/bin/ua2f`、`/etc/init.d/ua2f`、`/etc/config/ua2f`、`/etc/init.d/rkp-ipid-mark`，
      且 `/usr/bin/ua3f` **不在**（还有人往里塞 Go 版就红）
    - 镜像 ≤ **15,204,352 字节**（mtd7 firmware 分区真实大小，不是 profile 里那个 16064k）
+   - `files/` 覆盖层 15 个文件全部落进 rootfs，可执行位正确，状态页菜单/ACL/视图三件套齐全
+   - `BUILTIN_PKGS` 里 31 个包逐个出现在 `.config` 与 manifest 里
 
 3. Artifacts 下载 `openwrt-24.10.8-miwifi-3a-<n>`，里面有
    `*.squashfs-sysupgrade.bin` / `*.manifest` / `sha256sums` / `.config` / `build.log`。
@@ -113,6 +115,33 @@ LuCI → **状态 → 反检测状态**（`/cgi-bin/luci/admin/status/ganyu`）�
 实现是「`/usr/bin/ganyu-status` 出纯文本 + LuCI 视图原样显示」，所以命令行随时可以
 `ssh root@192.168.1.1 ganyu-status` 看同一份数据。数据全取自 `iptables -L -v` / `nft list`，
 **全是计数器，看一眼就是证据**，不需要信任任何中间层。
+
+## 内置附加包
+
+`BUILTIN_PKGS`（在 workflow「生成 .config」步骤里）会把下表这批包直接编进镜像，
+合计约 **1.1 MB**，比事后 opkg 装进 overlay 省 2–3 倍空间（squashfs 有压缩）。
+包名全部按 24.10.8 官方 `Packages` 索引核实过是**真实包名**（不是 `PROVIDES` 别名），
+任何一个写错都会被「额外包自检」拦下并 `::error::` 中断，不会静默丢包。
+
+| 用途 | 包 | 说明 |
+|---|---|---|
+| 传文件 | `openssh-sftp-server` | 设备原本没有 sftp 子系统，只能 `cat >` 硬灌 |
+| 命令行 | `nano` `curl` `htop` `lsof` `conntrack` `iftop` | `curl` 是 apk/脚本通用刚需 |
+| 网页终端 | `ttyd` + `luci-app-ttyd` | 302 KB，手机也能开 shell |
+| 看门狗 | `watchcat` + `luci-app-watchcat` | WAN 掉线自动重启接口（**默认不启用**） |
+| 流量统计 | `nlbwmon` + `luci-app-nlbwmon`、`vnstat` + `luci-app-vnstat2` | 按客户端 / 按接口 |
+| 限速 | `sqm-scripts` + `kmod-sched-cake` + `luci-app-sqm` | CAKE 整形（**默认不启用**，无线 WAN 上要手动调） |
+| 多拨容灾 | `mwan3` + `luci-app-mwan3` | 多 WAN 健康检查（**默认不启用**） |
+| VPN | `wireguard-tools` + `kmod-wireguard` + `luci-proto-wireguard` | 只有工具和协议，不建隧道 |
+| 端口映射 | `miniupnpd-nftables` + `luci-app-upnp` | nft 后端（**默认不启用**） |
+| DNS | `https-dns-proxy` + `luci-app-https-dns-proxy` | DoH 客户端（**默认不启用**） |
+| 远程唤醒 | `etherwake` + `luci-app-wol` | 局域网唤醒 |
+| 拥塞控制 | `kmod-tcp-bbr` + `files/etc/uci-defaults/94-bbr` | 首启把 `tcp_congestion_control` 设成 `bbr`，写进 `/etc/sysctl.conf` |
+| 命令页 | `luci-app-commands` | LuCI 里存常用命令 |
+
+刻意**没**装的：`wpad-mbedtls`（换掉 basic 净增 264 KB，收益不明显）、
+`sing-box`/`v2ray`/`xray`（十几 MB 的 Go 二进制，正是 UA3F 翻车的那个坑）、
+`zerotier`、`aria2`（3A 没有 USB）、`samba4`。
 
 ## 已知限制
 
