@@ -436,7 +436,7 @@ jobs:
                   usr/bin/ganyu-status \
                   usr/bin/ybu-wan-gate etc/init.d/ybu-wan-gate \
                    etc/uci-defaults/94-bbr etc/uci-defaults/92-packfix \
-                   etc/uci-defaults/88-bindlan etc/uci-defaults/89-wan-hostname \
+                   etc/uci-defaults/87-timezone etc/uci-defaults/88-bindlan etc/uci-defaults/89-wan-hostname \
                    etc/hotplug.d/iface/96-harden-wan \
                    usr/share/luci/menu.d/luci-app-ganyu.json \
                    usr/share/rpcd/acl.d/luci-app-ganyu.json \
@@ -452,7 +452,7 @@ jobs:
           # 两个自编内核模块必须落进 /lib/modules
           ls "$ROOT/lib/modules/6.6.144/rkp-ipid.ko" >/dev/null 2>&1 || { echo 'rootfs 里没有 rkp-ipid.ko'; exit 1; }
           ls "$ROOT/lib/modules/6.6.144/tcpts-strip.ko" >/dev/null 2>&1 || { echo 'rootfs 里没有 tcpts-strip.ko'; exit 1; }
-          for f in etc/init.d/ganyu-guard etc/init.d/ybu-login usr/bin/ybu-login etc/init.d/ua2f etc/uci-defaults/93-ua2f etc/uci-defaults/98-wan-sta usr/bin/ganyu-status etc/uci-defaults/94-bbr etc/uci-defaults/92-packfix etc/uci-defaults/88-bindlan etc/uci-defaults/89-wan-hostname etc/hotplug.d/iface/96-harden-wan usr/bin/ybu-wan-gate etc/init.d/ybu-wan-gate; do
+          for f in etc/init.d/ganyu-guard etc/init.d/ybu-login usr/bin/ybu-login etc/init.d/ua2f etc/uci-defaults/93-ua2f etc/uci-defaults/98-wan-sta usr/bin/ganyu-status etc/uci-defaults/94-bbr etc/uci-defaults/92-packfix etc/uci-defaults/87-timezone etc/uci-defaults/88-bindlan etc/uci-defaults/89-wan-hostname etc/hotplug.d/iface/96-harden-wan usr/bin/ybu-wan-gate etc/init.d/ybu-wan-gate; do
             test -x "$ROOT/$f" || { echo "$f 没有可执行位"; exit 1; }
           done
 
@@ -527,6 +527,8 @@ jobs:
             echo '::error::98-wan-sta 没有关闭 network.wan.auto（起网门禁失效）'; exit 1; }
           grep -q "option wan_gate" "$ROOT/etc/config/ybu" || {
             echo '::error::/etc/config/ybu 缺少 wan_gate 开关'; exit 1; }
+          grep -q "CST-8" "$ROOT/etc/uci-defaults/87-timezone" || {
+            echo '::error::87-timezone 没把时区设成 CST-8（起床区间会偏 8 小时）'; exit 1; }
           grep -q '{ 80, 8080 }' "$ROOT/etc/init.d/ua2f" || {
             echo '::error::ua2f 没有覆盖 8080 端口'; exit 1; }
 

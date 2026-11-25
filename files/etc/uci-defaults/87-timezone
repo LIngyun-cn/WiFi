@@ -1,0 +1,20 @@
+#!/bin/sh
+# 时区：必须设成北京时间（POSIX TZ 形式 CST-8）。
+#
+# 为什么这是功能性问题、不只是观感问题：
+#   ybu-wan-gate 的"起床区间"（工作日 06:45–09:15、周末 08:30–11:00）是用
+#   date +%H%M 算的。如果设备时区是默认的 UTC，这段区间会整体偏移 8 小时，
+#   变成北京时间 14:45–17:15 —— 恰好是下午最显眼的时段，比原来更糟。
+#   所以时区必须显式写死，不依赖 LuCI 里有没有点过。
+
+uci -q set system.ntp.timezone='CST-8'
+uci -q set system.@system[0].timezone='CST-8'
+uci -q commit system
+
+# /etc/TZ 是 shell/date 实际读的文件，sysntpd 重启时会按 uci 重写它；
+# 这里也直接写一份，保证在 sysntpd 起来之前 date 就已经是本地时间。
+echo 'CST-8' > /etc/TZ
+[ -x /etc/init.d/sysntpd ] && /etc/init.d/sysntpd restart >/dev/null 2>&1
+
+logger -t timezone "时区已设为 CST-8（北京时间），当前 $(date '+%Y-%m-%d %H:%M %Z')"
+exit 0
