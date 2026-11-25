@@ -1,0 +1,33 @@
+#!/bin/sh
+# 手动起网触发器：手机连上我们的 Wi-Fi 后打开 http://192.168.1.1/cgi-bin/wake
+# 就立刻结束门禁等待、把 WAN 拉起来。
+#
+# 为什么需要这个：门禁靠"AP 上出现了新 MAC"猜有没有人在场，但你宿舍就那几台设备，
+# 手机/平板会自动重连（哪怕人在睡觉），笔记本又不会自己开机 —— 拿 MAC 猜人并不可靠。
+# 人到宿舍、要用网了，最可靠的信号就是"人自己点了一下"，也就是这个页面。
+
+printf 'Content-Type: text/html; charset=utf-8\r\n'
+printf 'Cache-Control: no-store\r\n\r\n'
+
+: > /tmp/ybu-gate-wake
+chmod 644 /tmp/ybu-gate-wake
+
+WAN_UP=$(ifstatus wan 2>/dev/null | grep -c '"up": true')
+if [ "$WAN_UP" -gt "0" ]; then
+	MSG="WAN 现在就是通的，不用等。"
+else
+	MSG="已请求起网，10–30 秒后 WAN 会自己拉起来，然后自动过门户认证。"
+fi
+
+cat <<EOF
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>起网</title></head>
+<body style="font-family:system-ui,-apple-system,sans-serif;padding:2em;line-height:1.7;background:#111;color:#eee">
+<h2 style="margin-top:0">$MSG</h2>
+<p style="color:#8ab">刷新这个页面没害处；起网后可以直接关掉。</p>
+<p><a style="color:#4af" href="/cgi-bin/luci">进路由器管理页</a></p>
+</body></html>
+EOF
+exit 0

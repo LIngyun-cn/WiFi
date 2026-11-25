@@ -173,6 +173,7 @@ jobs:
           chmod 755 "$GITHUB_WORKSPACE"/files/etc/init.d/* 2>/dev/null || true
           chmod 755 "$GITHUB_WORKSPACE"/files/etc/uci-defaults/* 2>/dev/null || true
           chmod 755 "$GITHUB_WORKSPACE"/files/usr/bin/* 2>/dev/null || true
+          chmod 755 "$GITHUB_WORKSPACE"/files/www/cgi-bin/* 2>/dev/null || true
           mkdir -p files
           cp -r "$GITHUB_WORKSPACE/files/." files/
           find files -type f -exec ls -l {} \;
@@ -438,6 +439,7 @@ jobs:
                    etc/uci-defaults/94-bbr etc/uci-defaults/92-packfix \
                    etc/uci-defaults/87-timezone etc/uci-defaults/88-bindlan etc/uci-defaults/89-wan-hostname \
                    etc/hotplug.d/iface/96-harden-wan \
+                   www/cgi-bin/wake \
                    usr/share/luci/menu.d/luci-app-ganyu.json \
                    usr/share/rpcd/acl.d/luci-app-ganyu.json \
                    www/luci-static/resources/view/ganyu/status.js; do
@@ -452,7 +454,7 @@ jobs:
           # 两个自编内核模块必须落进 /lib/modules
           ls "$ROOT/lib/modules/6.6.144/rkp-ipid.ko" >/dev/null 2>&1 || { echo 'rootfs 里没有 rkp-ipid.ko'; exit 1; }
           ls "$ROOT/lib/modules/6.6.144/tcpts-strip.ko" >/dev/null 2>&1 || { echo 'rootfs 里没有 tcpts-strip.ko'; exit 1; }
-          for f in etc/init.d/ganyu-guard etc/init.d/ybu-login usr/bin/ybu-login etc/init.d/ua2f etc/uci-defaults/93-ua2f etc/uci-defaults/98-wan-sta usr/bin/ganyu-status etc/uci-defaults/94-bbr etc/uci-defaults/92-packfix etc/uci-defaults/87-timezone etc/uci-defaults/88-bindlan etc/uci-defaults/89-wan-hostname etc/hotplug.d/iface/96-harden-wan usr/bin/ybu-wan-gate etc/init.d/ybu-wan-gate; do
+          for f in etc/init.d/ganyu-guard etc/init.d/ybu-login usr/bin/ybu-login etc/init.d/ua2f etc/uci-defaults/93-ua2f etc/uci-defaults/98-wan-sta usr/bin/ganyu-status etc/uci-defaults/94-bbr etc/uci-defaults/92-packfix etc/uci-defaults/87-timezone etc/uci-defaults/88-bindlan etc/uci-defaults/89-wan-hostname etc/hotplug.d/iface/96-harden-wan usr/bin/ybu-wan-gate etc/init.d/ybu-wan-gate www/cgi-bin/wake; do
             test -x "$ROOT/$f" || { echo "$f 没有可执行位"; exit 1; }
           done
 
@@ -529,12 +531,18 @@ jobs:
             echo '::error::/etc/config/ybu 缺少 wan_gate 开关'; exit 1; }
           grep -q "CST-8" "$ROOT/etc/uci-defaults/87-timezone" || {
             echo '::error::87-timezone 没把时区设成 CST-8（起床区间会偏 8 小时）'; exit 1; }
-          grep -q 'early_used_today' "$ROOT/usr/bin/ybu-wan-gate" || {
-            echo '::error::ybu-wan-gate 缺少早触发的"每天一次"限制'; exit 1; }
-          grep -q 'ybu-gate-early.date' "$ROOT/usr/bin/ybu-wan-gate" || {
-            echo '::error::ybu-wan-gate 没有把早触发日期持久化到 /etc'; exit 1; }
-          grep -q "option early_trigger" "$ROOT/etc/config/ybu" || {
-            echo '::error::/etc/config/ybu 缺少 early_trigger 开关'; exit 1; }
+          # 手动起网：宿舍就那几台设备，靠"新 MAC"猜人在场不可靠（手机会自己重连），
+          # 所以留一个"人自己点一下"的入口：/cgi-bin/wake 落标记，门禁见到就立刻起网。
+          grep -q 'ybu-gate-wake' "$ROOT/usr/bin/ybu-wan-gate" || {
+            echo '::error::ybu-wan-gate 没有检查手动起网标记 /tmp/ybu-gate-wake'; exit 1; }
+          if grep -qE 'early_used_today|ybu-gate-early\.date|assoc_macs' "$ROOT/usr/bin/ybu-wan-gate"; then
+            echo '::error::ybu-wan-gate 又出现了"按新 MAC 猜人在场"的逻辑（会误触发，已废弃）'
+            exit 1
+          fi
+          test -x "$ROOT/www/cgi-bin/wake" || {
+            echo '::error::/www/cgi-bin/wake 缺失或不可执行（手动起网页面）'; exit 1; }
+          grep -q 'cgi-bin/wake' "$ROOT/etc/config/ybu" || {
+            echo '::error::/etc/config/ybu 没告诉用户怎么手动抢跑'; exit 1; }
           grep -q '{ 80, 8080 }' "$ROOT/etc/init.d/ua2f" || {
             echo '::error::ua2f 没有覆盖 8080 端口'; exit 1; }
 
