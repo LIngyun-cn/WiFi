@@ -67,11 +67,24 @@ return view.extend({
 
 		self.paint(host, data);
 
+		/* 同一个 ganyu-status 一次要 fork 五六十个命令、耗时 4 秒左右；如果
+		 * 上一次还没回来就再发一次，rpcd 里会排队，页面就卡在"正在载入"。
+		 * 所以：30 秒一次，而且上一轮没结束就跳过本轮。 */
+		var busy = false;
+
 		poll.add(function() {
+			if (busy)
+				return;
+
+			busy = true;
+
 			return fs.exec_direct('/usr/bin/ganyu-status').then(function(txt) {
 				self.paint(host, txt);
-			}).catch(function() {});
-		}, 10);
+			}).catch(function() {
+			}).finally(function() {
+				busy = false;
+			});
+		}, 30);
 
 		var check_out = E('pre', {
 			'style': 'display:none;font-family:monospace;font-size:12px;white-space:pre-wrap;' +

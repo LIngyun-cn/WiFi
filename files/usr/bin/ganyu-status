@@ -17,6 +17,23 @@ PREV=/tmp/ganyu-prev
 VERDICT=/tmp/ganyu-verdict
 EVENTS=/tmp/ganyu-events.log
 
+# ---- 结果缓存 -------------------------------------------------------------
+# 这个脚本要 fork 五六十次（iptables/nft/uci/ifstatus/jsonfilter…），在这颗
+# 575MHz 的 MT7628 上一次要 4 秒左右。LuCI 页面每 10 秒轮询一次、后台
+# ganyu-watch 每 60 秒一次，一旦有两次撞在一起，rpcd 里就会排队，页面就
+# 永远停在"正在载入视图…"—— 实测踩过（多个 ganyu-status 进程堆到 6 个）。
+# 所以：同一 mode 的结果缓存 CACHE_TTL 秒；忙不过来时直接吐上一次的结果。
+# --verdict 不缓存（watch 要靠它算差值），--fresh 强制重算。
+CACHE_TTL=${GANYU_CACHE_TTL:-20}
+MODE=plain
+NOCACHE=''
+case "$1" in
+	--json)    MODE=json ;;
+	--verdict) MODE=verdict; NOCACHE=1 ;;
+	--fresh)   MODE=plain; NOCACHE=1 ;;
+esac
+CACHE="/tmp/ganyu-status.cache.$MODE"
+
 N_PASS=0; N_WARN=0; N_FAIL=0; N_NA=0
 ITEMS=''
 
@@ -435,12 +452,31 @@ print_verdict() {
 	cat "$VERDICT"
 }
 
+# 缓存命中就直接吐上一次的结果（同一 mode、TTL 内）
+if [ -z "$NOCACHE" ] && [ -f "$CACHE" ]; then
+	cts=$(date -r "$CACHE" +%s 2>/dev/null)
+	now=$(date +%s)
+	case "$cts" in
+		''|*[!0-9]*) cts=0 ;;
+	esac
+	if [ "$cts" -gt 0 ] && [ "$((now - cts))" -lt "$CACHE_TTL" ]; then
+		cat "$CACHE"
+		exit 0
+	fi
+fi
+
 : >"$VERDICT"
 checks
 
-case "$1" in
-	--json)    print_json; echo ;;
-	--verdict) print_verdict ;;
-	*)         print_plain ;;
+case "$MODE" in
+	json)    OUT=$(print_json) ;;
+	verdict) OUT=$(print_verdict) ;;
+	*)       OUT=$(print_plain) ;;
 esac
+
+if [ -z "$NOCACHE" ] && [ -n "$OUT" ]; then
+	printf '%s\n' "$OUT" >"$CACHE.$$" 2>/dev/null && mv "$CACHE.$$" "$CACHE" 2>/dev/null
+fi
+
+printf '%s\n' "$OUT"
 exit 0
