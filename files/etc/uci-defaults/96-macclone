@@ -1,98 +1,40 @@
 #!/bin/sh
-# WAN 口 MAC 处理。
 #
-# 两件事：
-#   1) 没指定 MAC 时，自动生成一个"普通笔记本"的 MAC 并固定下来。
-#      为什么必须做：这台机器 WAN 侧原本是 50:64:2b:xx —— 小米 OUI，
-#      网关只要看一眼 MAC 前缀就知道"链路上是一台小米路由器"，
-#      比任何协议层指纹都直接、也不可能靠改配置绕过去。
-#   2) 把 MAC 同时写进 network.wan.macaddr 和 wireless.wan_sta.macaddr。
-#      WAN 走无线 STA 时，netifd 管的是逻辑接口，vif 的 MAC 由
-#      wpa_supplicant 设，两处不一致就会出现"网卡是一个 MAC、
-#      门户记录是另一个 MAC"。
+# WAN / AP 的 MAC 地址处理 —— 现在是「什么都不做」。
 #
-# 想指定成你 PC 的 MAC（复用已有认证记录）：
-#   uci set ybu.main.wan_mac='AA:BB:CC:DD:EE:FF'
-#   uci commit ybu
-#   reboot
+# ★★ 硬限制（2026-11-25 本机 A/B 实测，别再来一次）★★
+#   这颗网卡是 MT76x2E（phy1，5G）。只要给 phy1 上的任何 vif 指定自定义 MAC
+#   （不管是 AP 的 default_radio1.macaddr，还是 STA 的 wan_sta.macaddr），
+#   5G 射频就整个发不出包：
+#       hostapd: handle_probe_req: send failed      ← AP 连 beacon/probe 都发不出去
+#       iwinfo radio1: ESSID: unknown  HT Mode: NOHT
+#       wpa_supplicant: authentication with xx:xx:.. timed out
+#       CTRL-EVENT-SSID-TEMP-DISABLED ... reason=CONN_FAILED
+#   表现是：自家 Wi-Fi 还在广播、电脑能连上（2.4G 正常），但 WAN（走 phy1 的
+#   STA）永远拿不到 IP，看起来就像「固件刷坏了 / 没网了」。
+#   把 macaddr 全部删掉、用硬件默认地址重启，3 分钟内一切恢复正常。
+#   两次独立复现：
+#     ① AP + STA 同时覆盖 MAC  → 坏
+#     ② 只覆盖 STA 的 MAC      → 坏
+#     ③ 全部用硬件默认 MAC     → 好
+#   结论：MAC 克隆 / BSSID 去小米化 在这台机器上不可实现，不是配置问题。
 #
-# 注意：MAC 只认第一次认证时绑定的那个；改完必须重启让 netifd 重设网卡地址。
+# 背景（当初为什么想改）：WAN 侧原 MAC 是 50:64:2b:xx —— 小米 OUI，网关一眼
+# 就知道链路上是台小米路由器；AP 的 BSSID 同样是 50:64:2b:xx。这两条都是
+# 真实存在的指纹，但代价是整台机器断网，所以放弃。
+#
+# 想要「换 MAC」只有两条路，都不在本固件范围内：
+#   1) 换一颗驱动允许 per-vif MAC 的无线网卡（例如 USB 网卡做 STA）；
+#   2) 用有线做 WAN，然后只改 network.wan.macaddr —— eth0 是有线口，
+#      不受 mt76x2 的限制（但要自己承担「改了 MAC 就要重新过门户认证」）。
+#
+# 因此本脚本保留 ybu.main.wan_mac 这个 uci 字段（仅为以后换硬件时留接口），
+# 但绝不写进 network.wan.macaddr / wireless.wan_sta.macaddr，
+# 也绝不设 wireless.default_radio*.macaddr。
 
 MAC=$(uci -q get ybu.main.wan_mac)
-
-if [ -z "$MAC" ]; then
-	# Intel OUI 3c:a9:f4 —— 笔记本里最常见的几个前缀之一。
-	# 用 /dev/urandom 取后三段；生成一次就写进 uci，之后每次开机都是同一个，
-	# 不会因为重启而被网关当成"新设备"。
-	tail=$(hexdump -n 3 -e '3/1 "%02x"' /dev/urandom 2>/dev/null)
-	case "$tail" in
-	[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
-	*) tail=$(awk 'BEGIN { srand(); printf "%06x", int(rand() * 16777216) }') ;;
-	esac
-	MAC="3c:a9:f4:$(echo "$tail" | cut -c1-2):$(echo "$tail" | cut -c3-4):$(echo "$tail" | cut -c5-6)"
-	uci -q set ybu.main.wan_mac="$MAC"
-	uci -q commit ybu
-	logger -t macclone "WAN MAC 未指定，自动生成 $MAC（重启后生效）"
+if [ -n "$MAC" ]; then
+	logger -t macclone "检测到 ybu.main.wan_mac=$MAC，但本机 MT76x2E 不支持自定义 vif MAC，已忽略"
 fi
-
-case "$MAC" in
-*:*:*:*:*:*) ;;
-*) exit 0 ;;
-esac
-
-current=$(uci -q get network.wan.macaddr)
-if [ "$current" != "$MAC" ]; then
-	uci -q set network.wan.macaddr="$MAC"
-	uci -q commit network
-	logger -t macclone "WAN MAC -> $MAC（重启后生效）"
-fi
-
-if uci -q get wireless.wan_sta >/dev/null 2>&1; then
-	cur2=$(uci -q get wireless.wan_sta.macaddr)
-	if [ "$cur2" != "$MAC" ]; then
-		uci -q set wireless.wan_sta.macaddr="$MAC"
-		uci -q commit wireless
-		logger -t macclone "STA MAC -> $MAC（重启后生效）"
-	fi
-fi
-
-# 自己开的 AP 同样在自报 MIB：BSSID 原来是 50:64:2B:C1:00:56 / :57，
-# 和小米出厂网卡同 OUI。学校查"私接路由器"时是用巡测/嗅探扫 2.4G/5G 的，
-# 扫到一个小米 OUI 的 BSSID 就等于当场抓到人 —— 这跟"多设备检测"是两码事，
-# 但后果更直接（通报/断网）。
-# 这里把两个 AP 的 BSSID 也换成克隆 MAC 的 OUI，看起来就是"某台笔记本开的
-# 移动热点" —— Windows 移动热点本来就直接拿网卡 MAC 当 BSSID。
-#
-# ★ 血泪教训（v9 线上实测）：AP 和 STA 跑在同一个 phy1 上。
-#   如果算出来的 AP 地址正好等于 STA 的 MAC，内核会让 phy1-sta0 起不来：
-#       wpa_supplicant: Could not set interface phy1-sta0 flags (UP)
-#       wpa_supplicant: nl80211: Could not set interface 'phy1-sta0' UP
-#       wpa_supplicant: phy1-sta0: Failed to initialize driver interface
-#   后果就是 AP 亮着、WAN 全断（拿不到 DHCP、也没法登录门户），
-#   现场看起来像"固件坏了"。所以下面必须保证 AP 地址 ≠ WAN/STA 地址。
-APOUI=$(echo "$MAC" | cut -d: -f1-3)
-AP4=$(echo "$MAC" | cut -d: -f4)
-AP5=$(echo "$MAC" | cut -d: -f5)
-
-ap_mac_for() {
-	_m="$APOUI:$AP4:$AP5:$(printf '%02x' "$1")"
-	if [ "$_m" = "$MAC" ]; then
-		# 撞上了 WAN/STA 的 MAC，往后挪一个
-		_m="$APOUI:$AP4:$AP5:$(printf '%02x' "$(( $1 + 1 ))")"
-	fi
-	printf '%s' "$_m"
-}
-
-set_ap_mac() {
-	_want=$(ap_mac_for "$2")
-	[ -n "$(uci -q get "wireless.$1")" ] || return 0
-	[ "$(uci -q get "wireless.$1.macaddr")" = "$_want" ] && return 0
-	uci -q set "wireless.$1.macaddr=$_want"
-	logger -t macclone "AP BSSID $1 -> $_want（重启后生效）"
-}
-
-set_ap_mac default_radio0 86	# 0x56
-set_ap_mac default_radio1 87	# 0x57
-uci -q commit wireless
 
 exit 0

@@ -506,12 +506,17 @@ jobs:
           # 这个坑不许再回来，所以断言它不存在。
           test ! -e "$ROOT/etc/uci-defaults/86-wan-dhcp" || {
             echo '::error::86-wan-dhcp 又出现了：它会打断 DHCP 路由下发'; exit 1; }
-          grep -q 'ap_mac_for' "$ROOT/etc/uci-defaults/96-macclone" || {
-            echo '::error::96-macclone 缺少 AP/STA 撞 MAC 的规避逻辑'; exit 1; }
+          # 反面断言：这颗 MT76x2E 不接受任何自定义 vif MAC —— 只要给 phy1 上的
+          # AP 或 STA 指定 macaddr，5G 射频就发不出包（handle_probe_req: send
+          # failed），表现为"刷完固件没网"。实测两次复现，所以断言脚本里不许再
+          # 出现写 macaddr 的语句。
+          if grep -qE 'set (network\.wan|wireless\.wan_sta|wireless\.default_radio[01])\.macaddr' \
+              "$ROOT/etc/uci-defaults/96-macclone"; then
+            echo '::error::96-macclone 又在写自定义 MAC：MT76x2E 会让 5G 射频发不出包，刷完就断网'
+            exit 1
+          fi
           grep -q '{ 80, 8080 }' "$ROOT/etc/init.d/ua2f" || {
             echo '::error::ua2f 没有覆盖 8080 端口'; exit 1; }
-          grep -q '3c:a9:f4' "$ROOT/etc/uci-defaults/96-macclone" || {
-            echo '::error::96-macclone 没有自动生成非小米 OUI 的 MAC'; exit 1; }
 
           # 三个断言：ua2f 用的是我们改过的配置（不是包自带默认）、init 走的是 NFQUEUE 而不是 iptables 老路、
           # 而且 ua3f 那种"装了但跑不动"的包这次真的不该再出现在镜像里
