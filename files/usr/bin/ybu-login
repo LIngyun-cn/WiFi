@@ -254,11 +254,69 @@ set_mode() {
 	echo "已切换，reboot 后生效（别用 wifi reload —— 这台机器 reload 会 OOM）"
 }
 
+# ── 开机门禁：别在"来电那一刻"准点上线 ────────────────────────────────
+# 宿舍 23:00 断电、次日 5–6 点来电。如果路由器一上电就在 30 秒内认证成功，
+# 网管看到的是「某设备每天 05:0x 准点上线、误差几十秒」，这是比 TTL/IPID 更
+# 直白的异常——真人是醒来后手动连网，时间点散在 6:00–9:30 之间且天天不同。
+#
+# 所以开机后先不登录，等一个从"人类起床区间"里抽的随机时刻：
+#   工作日 06:45–09:15、周末 08:30–11:00，均匀采样每分钟一点。
+# 如果抽到的时刻已经过去（比如中午才来电），就等 60–360 秒的随机抖动后立刻登录。
+# 门禁只在「本次开机」生效（标记写 /tmp，掉电即消失），进程重启不会重新等。
+wake_wait() {
+	local dow wf wt
+	dow=$(date +%u)
+	if [ "$dow" -ge 6 ]; then
+		wf=$(c wake_from_weekend); wt=$(c wake_to_weekend)
+		[ -n "$wf" ] || wf=0830
+		[ -n "$wt" ] || wt=1100
+	else
+		wf=$(c wake_from); wt=$(c wake_to)
+		[ -n "$wf" ] || wf=0645
+		[ -n "$wt" ] || wt=0915
+	fi
+	awk -v t="$(date +%H%M)" -v a="$wf" -v b="$wt" -v seed="$$$(date +%M)${dow}" 'BEGIN{
+		srand(seed)
+		am = int(a / 100) * 60 + a % 100
+		bm = int(b / 100) * 60 + b % 100
+		if (bm <= am) bm = am + 60
+		tm = am + int(rand() * (bm - am + 1))
+		now = int(t / 100) * 60 + t % 100
+		w = (tm - now) * 60
+		if (w < 0) w = 60 + int(rand() * 300)
+		printf "%d", w
+	}'
+}
+
+startup_gate() {
+	local w i
+	[ -f /tmp/ybu-login.gate ] && return 0
+	# 起网门禁（ybu-wan-gate）已经把"上线时刻"随机化了：WAN 是睡醒才 ifup 的，
+	# 那时候立刻认证就像"人到宿舍、开电脑、连网、点浏览器"，再叠一层延迟反而怪。
+	case "$(c wan_gate)" in
+	0) ;;
+	*) : > /tmp/ybu-login.gate; return 0 ;;
+	esac
+	# 已经有会话（没断过电、只是进程重启）就别等了
+	online && { : > /tmp/ybu-login.gate; return 0; }
+	w=$(wake_wait)
+	[ -n "$w" ] || w=120
+	log "开机门禁：本次等 ${w} 秒再尝试登录（避开「来电即上线」的固定时刻指纹）"
+	: > /tmp/ybu-login.gate
+	i=0
+	while [ "$i" -lt "$w" ]; do
+		sleep 30
+		i=$((i + 30))
+	done
+	return 0
+}
+
 daemon() {
 	local interval st
 	interval=$(c interval)
 	[ -n "$interval" ] || interval=60
 	log "守护启动，探测间隔 ${interval}s"
+	startup_gate
 	while :; do
 		online; st=$?
 		if [ "$st" -ne 0 ]; then
@@ -279,10 +337,11 @@ case "$1" in
 	login)  login; exit $? ;;
 	check)  online; case $? in 0) echo online ;; 1) echo offline ;; *) echo unknown ;; esac ;;
 	status) status ;;
+	wakewait) wake_wait; echo ;;
 	url)    build_url ;;
 	mac)    show_mac ;;
 	mode)   set_mode "$2" ;;
 	b64)    b64 "$2"; exit $? ;;          # 自测用
 	daemon|"") daemon ;;
-	*) echo "用法: $0 {daemon|login|check|status|url|mac|mode|b64}" >&2; exit 1 ;;
+	*) echo "用法: $0 {daemon|login|check|status|url|mac|mode|wakewait|b64}" >&2; exit 1 ;;
 esac

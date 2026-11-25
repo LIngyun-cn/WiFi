@@ -433,7 +433,8 @@ jobs:
                    etc/init.d/rkp-ipid-mark etc/uci-defaults/90-rkp-ipid \
                    usr/bin/ybu-login etc/init.d/ybu-login etc/config/ybu etc/uci-defaults/95-ybu etc/uci-defaults/96-macclone \
                    etc/init.d/ganyu-guard etc/config/ganyu etc/uci-defaults/97-ganyu etc/uci-defaults/98-wan-sta \
-                   usr/bin/ganyu-status \
+                  usr/bin/ganyu-status \
+                  usr/bin/ybu-wan-gate etc/init.d/ybu-wan-gate \
                    etc/uci-defaults/94-bbr etc/uci-defaults/92-packfix \
                    etc/uci-defaults/88-bindlan etc/uci-defaults/89-wan-hostname \
                    etc/hotplug.d/iface/96-harden-wan \
@@ -451,7 +452,7 @@ jobs:
           # 两个自编内核模块必须落进 /lib/modules
           ls "$ROOT/lib/modules/6.6.144/rkp-ipid.ko" >/dev/null 2>&1 || { echo 'rootfs 里没有 rkp-ipid.ko'; exit 1; }
           ls "$ROOT/lib/modules/6.6.144/tcpts-strip.ko" >/dev/null 2>&1 || { echo 'rootfs 里没有 tcpts-strip.ko'; exit 1; }
-          for f in etc/init.d/ganyu-guard etc/init.d/ybu-login usr/bin/ybu-login etc/init.d/ua2f etc/uci-defaults/93-ua2f etc/uci-defaults/98-wan-sta usr/bin/ganyu-status etc/uci-defaults/94-bbr etc/uci-defaults/92-packfix etc/uci-defaults/88-bindlan etc/uci-defaults/89-wan-hostname etc/hotplug.d/iface/96-harden-wan; do
+          for f in etc/init.d/ganyu-guard etc/init.d/ybu-login usr/bin/ybu-login etc/init.d/ua2f etc/uci-defaults/93-ua2f etc/uci-defaults/98-wan-sta usr/bin/ganyu-status etc/uci-defaults/94-bbr etc/uci-defaults/92-packfix etc/uci-defaults/88-bindlan etc/uci-defaults/89-wan-hostname etc/hotplug.d/iface/96-harden-wan usr/bin/ybu-wan-gate etc/init.d/ybu-wan-gate; do
             test -x "$ROOT/$f" || { echo "$f 没有可执行位"; exit 1; }
           done
 
@@ -515,6 +516,17 @@ jobs:
             echo '::error::96-macclone 又在写自定义 MAC：MT76x2E 会让 5G 射频发不出包，刷完就断网'
             exit 1
           fi
+          # 起网门禁：只延迟"登录"不够 —— 没认证的设备照样 DHCP/ARP，校园网侧
+          # 一样看到「每天 05:0x 准时出现」。所以断言：门禁脚本在、wan_wait 在、
+          # 98-wan-sta 里确实把 network.wan.auto 关掉。
+          grep -q 'ybu-login wakewait' "$ROOT/usr/bin/ybu-wan-gate" || {
+            echo '::error::ybu-wan-gate 没有调用 ybu-login wakewait 取随机时长'; exit 1; }
+          grep -q 'wakewait)' "$ROOT/usr/bin/ybu-login" || {
+            echo '::error::ybu-login 缺少 wakewait 子命令'; exit 1; }
+          grep -q "network.wan.auto='0'" "$ROOT/etc/uci-defaults/98-wan-sta" || {
+            echo '::error::98-wan-sta 没有关闭 network.wan.auto（起网门禁失效）'; exit 1; }
+          grep -q "option wan_gate" "$ROOT/etc/config/ybu" || {
+            echo '::error::/etc/config/ybu 缺少 wan_gate 开关'; exit 1; }
           grep -q '{ 80, 8080 }' "$ROOT/etc/init.d/ua2f" || {
             echo '::error::ua2f 没有覆盖 8080 端口'; exit 1; }
 

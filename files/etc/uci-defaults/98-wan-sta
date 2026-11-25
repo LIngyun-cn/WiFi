@@ -16,6 +16,22 @@
 mode=$(uci -q get ybu.main.wan_mode)
 [ -n "$mode" ] || mode='sta'
 
+# 起网门禁：把 WAN 的自动起网关掉，改由 ybu-wan-gate 在随机时刻 ifup。
+# 只延迟"登录"没用 —— 没认证的设备照样会 DHCP/ARP，校园网侧一样看到
+# 「每天 05:0x 准时出现」。这里连关联带 DHCP 一起推迟。
+apply_gate() {
+	case "$(uci -q get ybu.main.wan_gate)" in
+	1 | '')
+		uci -q set network.wan.auto='0'
+		logger -t wan-sta "起网门禁开启：network.wan.auto=0，开机后等 ybu-wan-gate 随机时刻 ifup"
+		;;
+	*)
+		uci -q set network.wan.auto='1'
+		logger -t wan-sta "起网门禁关闭：network.wan.auto=1，开机立刻起网"
+		;;
+	esac
+	uci -q commit network
+}
 if [ "$mode" = "wired" ]; then
 	# 有线模式：WAN 绑定 eth0.1，STA 停用（两个 WAN 同时起来会抢默认路由）
 	uci -q set network.wan.device='eth0.1'
@@ -25,6 +41,7 @@ if [ "$mode" = "wired" ]; then
 		uci -q set wireless.wan_sta.disabled='1'
 		uci -q commit wireless
 	fi
+	apply_gate
 	logger -t wan-sta "WAN 模式 = wired（eth0.1 有线 DHCP，STA 已停用）"
 	exit 0
 fi
@@ -56,4 +73,7 @@ uci -q commit network
 	uci commit wireless
 }
 
+apply_gate
+
 exit 0
+

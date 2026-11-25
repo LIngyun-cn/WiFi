@@ -1,0 +1,58 @@
+#!/bin/sh
+#
+# 起网门禁：开机后不立刻把 WAN 拉起来。
+#
+# 为什么要这么做（2026-11-25 用户指出的真问题）：
+#   宿舍 23:00 断电、次日 5–6 点来电。路由器一上电就 wpa 关联 + DHCP + 门户认证，
+#   网管侧看到的是「某 MAC 每天 05:0x 准点出现、误差几十秒，且天天如此」——
+#   这比 TTL/IPID 之类协议指纹直白得多，属于行为层证据。
+#   只延迟"登录"是不够的：没认证的设备照样会 DHCP 拿地址、进 ARP/邻居表，
+#   在校园网侧一样是"每天 5 点准时开机"。
+#
+# 所以这里把整条 WAN 的起网都推迟：network.wan.auto=0（由 98-wan-sta 写死），
+# 本脚本睡一个从"人类起床区间"里抽的随机时长，再 ifup wan。
+#   · 工作日 06:45–09:15、周末 08:30–11:00，按分钟均匀采样
+#   · 若当前时刻已过该区间（中午才来电），只等 60–360 秒
+#   · 任何异常（算不出来 / ifup 失败）立刻 ifup，绝不把网络卡死
+#
+# 与 portal 登录的关系：WAN 起来后 ybu-login 的 daemon 会立刻认证，
+# 此时 ybu-login 的"开机门禁"自动跳过（见 ybu-login 里 wan_gate 判断），
+# 避免叠加出"6:45 连上、9:00 才登录"这种反倒奇怪的组合。
+
+. /lib/functions.sh
+
+log() { logger -t ybu-wan-gate "$*"; echo "$*"; }
+
+c() { uci -q get ybu.main.$1; }
+
+ifup_wan() {
+	local i
+	for i in 1 2 3; do
+		ifup wan >/dev/null 2>&1 && return 0
+		sleep 10
+	done
+	return 1
+}
+
+W=$(/usr/bin/ybu-login wakewait 2>/dev/null)
+case "$W" in
+'' | *[!0-9]*) W=120 ;;
+esac
+# 上限 4 小时，防止某个 uci 配置写错把网络推迟一整天
+[ "$W" -gt 14400 ] && W=14400
+
+log "起网门禁：本次等 ${W} 秒（$((W / 60)) 分钟）再拉起 WAN"
+
+i=0
+while [ "$i" -lt "$W" ]; do
+	sleep 30
+	i=$((i + 30))
+done
+
+if ifup_wan; then
+	log "WAN 已拉起（门禁结束）"
+else
+	log "WAN 拉起失败，再试一次 ifup wan"
+	ifup wan >/dev/null 2>&1
+fi
+exit 0

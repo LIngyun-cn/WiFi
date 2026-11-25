@@ -19,3 +19,14 @@ config main 'main'
 	option interval '60'
 	# WAN 口要克隆成的 MAC（复制你 PC 的 MAC 用；不填就用网卡原始 MAC）
 	option wan_mac ''
+	# ── 起网门禁 ──────────────────────────────────────────────────
+	# 宿舍 23:00 断电、次日 5–6 点来电。如果一上电就起网+认证，网管看到的是
+	# 「同一 MAC 每天 05:0x 准点出现」，这是行为层铁证，比协议指纹好抓得多。
+	# wan_gate=1 时：network.wan.auto 被设成 0，开机后由 ybu-wan-gate 睡到一个
+	# 从下面区间里抽的随机时刻，再 ifup wan。
+	option wan_gate '1'
+	# 工作日 / 周末的"起床区间"（HHMM）。按分钟均匀采样，天天不同。
+	option wake_from '0645'
+	option wake_to '0915'
+	option wake_from_weekend '0830'
+	option wake_to_weekend '1100'

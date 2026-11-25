@@ -1,0 +1,26 @@
+#!/bin/sh /etc/rc.common
+#
+# 把 ybu-wan-gate 挂到开机流程上。
+#
+# 不能写成"脚本里 sleep 4 小时"：/etc/init.d 的脚本是串行执行的，
+# 谁在前台睡，后面 dnsmasq / firewall / uhttpd 全得跟着等。
+# 所以这里用 procd 起一个独立实例跑 ybu-wan-gate，开机流程照常往下走，
+# 只是 WAN 这条线要等到门禁时间点才被 ifup 拉起。
+
+START=95
+STOP=10
+USE_PROCD=1
+
+start_service() {
+	# 门禁只在"开机"这一轮生效；如果你手动 /etc/init.d/ybu-wan-gate restart，
+	# 也是重新抽一次随机时长（等同模拟一次开机），符合直觉。
+	procd_open_instance
+	procd_set_param command /usr/bin/ybu-wan-gate
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
+}
+
+service_triggers() {
+	procd_add_reload_trigger "ybu"
+}

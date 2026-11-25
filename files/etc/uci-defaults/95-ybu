@@ -5,4 +5,5 @@
 
 [ -f /usr/bin/ybu-login ] && chmod 755 /usr/bin/ybu-login
 [ -x /etc/init.d/ybu-login ] && /etc/init.d/ybu-login enable
+[ -x /etc/init.d/ybu-wan-gate ] && /etc/init.d/ybu-wan-gate enable
 exit 0
