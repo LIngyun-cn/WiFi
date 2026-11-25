@@ -166,6 +166,10 @@ jobs:
           # 别用 `tar -tzf ... | head -3`：head 提前关管道，tar 报 "stdout: write error" 退 2，
           # 配上 set -e/pipefail 会把整个步骤判失败（踩过一次）。sed 会读完整个流，安全。
           tar -tzf package/ua2f/src.tar.gz | sed -n '1,3p'
+          # 断言补丁真的在归档里：原 UA 比 custom_ua 短时跳过替换（否则会被截成
+          # "Mozilla/5.0 (Windows" 这种畸形头）。归档被换回官方原件就直接失败。
+          tar -xzOf package/ua2f/src.tar.gz UA2F-5.2.0/src/handler.c | grep -q 'skip_short_ua' || {
+            echo '::error::src.tar.gz 里没有 skip_short_ua 补丁（是不是又换回官方原件了？）'; exit 1; }
 
           # ---- 3. 根文件系统覆盖层 ----
           # Windows 上 git core.filemode=false，可执行位不可靠，这里强制修一遍

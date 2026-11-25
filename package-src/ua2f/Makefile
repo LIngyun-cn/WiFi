@@ -10,7 +10,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=ua2f
 PKG_VERSION:=5.2.0
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 
 PKG_LICENSE:=GPL-3.0-only
 PKG_LICENSE_FILES:=LICENSE
@@ -19,8 +19,12 @@ PKG_MAINTAINER:=Zxilly <zhouxinyu1001@gmail.com>
 # 源码包 vendor 在本目录（src.tar.gz），不走 OpenWrt 的 Download 机制：
 # 上游没有 release 附件，GitHub 归档走 github_archive 方法时 MIRROR_HASH
 # 只有先下过一次才知道，且构建期间还得能连 GitHub。直接进仓库最可复现。
-# src.tar.gz = UA2F v5.2.0 官方归档
-# sha256 = 025fa6b7f8e1e0d03d005899790249fd5e10f45b05ec0eb65fd7622be2609ca7
+# src.tar.gz = UA2F v5.2.0 官方归档 + 我们一处补丁（src/handler.c 的 skip_short_ua）
+# 官方原件 sha256 = 025fa6b7f8e1e0d03d005899790249fd5e10f45b05ec0eb65fd7622be2609ca7
+# 打过补丁后 sha256 = 3bfeae4582c34fdf85cb4097b569fb430200285b705735122bd087fe4650ca5a
+# 补丁内容：ua2f 只能原地等长写入，原 UA 比 custom_ua 短时会被截断成
+# "Mozilla/5.0 (Windows" 这种没有结尾的畸形头（比不改更容易被 DPI 挑出来），
+# 所以 ua_len < strlen(custom_ua) 时整条跳过、保留原样。原件另存为 src.orig.tar.gz。
 # 解包后是 UA2F-5.2.0/ 一层，所以 Build/Prepare 里 --strip-components=1
 
 PKG_BUILD_PARALLEL:=1
