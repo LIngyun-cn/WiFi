@@ -1,6 +1,6 @@
 #!/bin/sh
 #
-# 起网门禁（+ 手动抢跑）
+# 起网门禁 + 连上即插队
 #
 # 背景（2026-11-25 用户指出的真问题）：
 #   宿舍 23:00 断电、次日 5–6 点来电。路由器一上电就 wpa 关联 + DHCP + 门户认证，
@@ -8,22 +8,42 @@
 #   只延迟「登录」没用：没认证的设备照样 DHCP/ARP，一样是「每天 5 点准时上线」。
 #   所以在 WAN 这一层推迟起网（network.wan.auto=0，由 98-wan-sta 写入）。
 #
-# 现在只有两条通路能结束等待：
-#   1) 到点：在 06:45–09:15（周末 08:30–11:00）里按分钟均匀抽一个时刻，到了就 ifup wan。
-#   2) 手动：门禁期间用手机打开 http://192.168.1.1/cgi-bin/wake，落一个标记文件，
-#      本脚本 10 秒内看到就立刻 ifup wan。这是"人真的要用网了"最可靠的信号 ——
-#      人自己点了一下，比猜 MAC 靠谱得多。
+# 三条通路，谁先到算谁：
+#   1) 连上即插队：门禁等待期间每 5 秒扫一次 AP 关联列表，只要有客户端连着就起网。
+#      这是最常用的路 —— 你醒了手机连上 Wi-Fi，一分钟内就有网，不用点任何东西。
+#   2) 手动：手机/电脑打开 http://192.168.1.1/cgi-bin/wake，落标记文件，本脚本立刻起网。
+#      （门禁期间 LAN 和 Wi-Fi 都通，只是没有外网）
+#   3) 到点兜底：在 06:45–09:15（周末 08:30–11:00）里按分钟均匀抽一个时刻，到了就起网。
+#      万一没人连，也不会一整天没网。
 #
-# 明确不做（2026-11-25 删掉）：曾用"AP 上出现新 MAC ⇒ 人在场"来做早触发，实测失败：
-#   刷完机重启，用户手机在 2 分 10 秒后才自动重连，被当成"人来了"，把当天唯一一次
-#   抢跑机会用掉了 —— 等于把"每天准点上线"又带回来了。原因很朴素：宿舍里就那几台设备，
-#   手机/平板会自己重连（人在睡觉也连），笔记本不会自己开机，MAC 信号没有信息量。
+# 两条已知取舍（用户 2026-11-25 拍板）：
+#   · 不区分"新设备"和"自己连回来的手机"：早上通电后手机若自己切回我们的 AP，
+#     路由器就会跟着上线（约 5:0x）。用户判断这是小概率事件，接受；日志会记下
+#     "因哪个 MAC、几点几分起网"，观察一周再决定要不要换方案。
+#   · 宁可误起网，也不让手机挂在"有信号没外网"的 Wi-Fi 上 —— 那比误起网更耽误事。
 #
 # 起网之后保持连线、不回头；门户会话掉了由 ybu-login daemon 自动重登。
 
 . /lib/functions.sh
 
 log() { logger -t ybu-wan-gate "$*"; echo "$*"; }
+
+c() { uci -q get ybu.main.$1; }
+
+# AP 上当前关联的客户端 MAC（只是"有没有人连着"，不区分新旧）
+# 留 YBU_TEST_ASSOC 钩子给测试用，真机走 iwinfo。
+assoc_macs() {
+	if [ -n "$YBU_TEST_ASSOC" ]; then
+		printf '%s\n' "$YBU_TEST_ASSOC"
+		return 0
+	fi
+	local i
+	for i in phy0-ap0 phy1-ap0; do
+		# iwinfo 输出形如：AA:BB:CC:DD:EE:FF  -45 dBm / -95 dBm (SNR 50)  120 ms ago
+		# 只取"冒号的第一段"，不用 {5} 区间量词（busybox awk 支持不稳）。
+		iwinfo "$i" assoclist 2>/dev/null | awk 'NF >= 2 && $1 ~ /:/ {print tolower($1)}'
+	done
+}
 
 ifup_wan() {
 	local i
@@ -40,27 +60,48 @@ case "$W" in
 esac
 [ "$W" -gt 14400 ] && W=14400
 
-log "起网门禁：本次等 ${W} 秒（$((W / 60)) 分钟）再拉起 WAN；需要立刻上网就打开 http://192.168.1.1/cgi-bin/wake"
+# 已经在线的就别再 ifup 了：对已 up 的接口 ifup 会让 netifd 重新 deauth/assoc，
+# 白掉线一分钟（实测：手动 service start 时把好好的 WAN 打断过一次）。
+if ifstatus wan 2>/dev/null | grep -q '"up": true'; then
+	log "WAN 已经在线，门禁不需要动作"
+	exit 0
+fi
+
+EARLY=$(c early_trigger)
+[ -n "$EARLY" ] || EARLY=1
+
+log "起网门禁：本次等 ${W} 秒（$((W / 60)) 分钟）再拉起 WAN；连上即插队=${EARLY}；手动入口 http://192.168.1.1/cgi-bin/wake"
 
 # 清掉上一轮遗留的手动起网标记（否则一开机会立刻起网）
 rm -f /tmp/ybu-gate-wake
 
 i=0
-manual=0
+why=""
 while [ "$i" -lt "$W" ]; do
 	if [ -f /tmp/ybu-gate-wake ]; then
 		rm -f /tmp/ybu-gate-wake
-		manual=1
-		log "手动请求起网（LAN 页面 /cgi-bin/wake），跳过剩余 $((W - i)) 秒"
+		why="手动请求（/cgi-bin/wake），跳过剩余 $((W - i)) 秒"
 		break
 	fi
-	sleep 10
-	i=$((i + 10))
+	if [ "$EARLY" = "1" ]; then
+		first=""
+		for m in $(assoc_macs); do
+			first="$m"
+			break
+		done
+		if [ -n "$first" ]; then
+			why="检测到客户端接入（$first），提前 $((W - i)) 秒起网"
+			break
+		fi
+	fi
+	sleep 5
+	i=$((i + 5))
 done
 
 if ifup_wan; then
-	if [ "$manual" = "1" ]; then
-		log "WAN 已拉起（手动请求）"
+	if [ -n "$why" ]; then
+		log "$why"
+		log "WAN 已拉起（提前）"
 	else
 		log "WAN 已拉起（门禁结束）"
 	fi

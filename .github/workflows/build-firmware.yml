@@ -535,10 +535,13 @@ jobs:
           # 所以留一个"人自己点一下"的入口：/cgi-bin/wake 落标记，门禁见到就立刻起网。
           grep -q 'ybu-gate-wake' "$ROOT/usr/bin/ybu-wan-gate" || {
             echo '::error::ybu-wan-gate 没有检查手动起网标记 /tmp/ybu-gate-wake'; exit 1; }
-          if grep -qE 'early_used_today|ybu-gate-early\.date|assoc_macs' "$ROOT/usr/bin/ybu-wan-gate"; then
-            echo '::error::ybu-wan-gate 又出现了"按新 MAC 猜人在场"的逻辑（会误触发，已废弃）'
-            exit 1
-          fi
+          # 连上即插队：门禁期间扫 AP 关联列表，有客户端就连 WAN 拉起来。
+          grep -q 'assoc_macs' "$ROOT/usr/bin/ybu-wan-gate" || {
+            echo '::error::ybu-wan-gate 没有扫描 AP 关联列表，"连上即插队"失效'; exit 1; }
+          grep -q 'sleep 5' "$ROOT/usr/bin/ybu-wan-gate" || {
+            echo '::error::ybu-wan-gate 轮询间隔不是 5 秒（插队响应太慢）'; exit 1; }
+          grep -q "assoc_macs" "$ROOT/etc/config/ybu" && {
+            echo '::warning::/etc/config/ybu 里出现了 assoc_macs 字样，确认不是误写'; }
           test -x "$ROOT/www/cgi-bin/wake" || {
             echo '::error::/www/cgi-bin/wake 缺失或不可执行（手动起网页面）'; exit 1; }
           grep -q 'cgi-bin/wake' "$ROOT/etc/config/ybu" || {
