@@ -77,9 +77,16 @@ UA3F（`SunBK201/UA3F`）是一个 Go 写的 17.6MB 静态二进制。在这台�
 
 换成 `Zxilly/UA2F`（C 实现，v5.2.0）：
 
-- 源码 vendored 在 `package-src/ua2f/src.tar.gz`（sha256 `025fa6b7…609ca7`）。不走 OpenWrt 的
+- 源码 vendored 在 `package-src/ua2f/src.tar.gz`（**打过一处补丁**，见下）。不走 OpenWrt 的
   `Download/` 机制，是因为上游没有 release 附件，GitHub 归档走 `github_archive` 方法时
   `MIRROR_HASH` 只有先下过一次才知道。vendored 进仓库 = 构建期不联网、完全可复现。
+- **补丁 `skip_short_ua`**：ua2f 是原地等长替换，替换长度被强制等于原 UA 长度。
+  真实浏览器 UA 110+ 字节，走"后面补空格"那条路，无害；但 `okhttp/4.9.0`（12 字节）、
+  `curl/8.x`（10 字节）这类短 UA 会被截成 `User-Agent: Mozilla/5.0 (Windows` —— 一个没有
+  结尾的畸形头，比保留原样更像"有人在中间改包"（DPI 一条"UA 不含 `)`"就能命中）。
+  所以 `src/handler.c` 的 mangle 循环里加了 `ua_len < strlen(custom_ua)` 就整条跳过。
+  归档里的 `handler.c` 成员被重写，其余 176 个成员按原 TarInfo 逐个复制（权限位不变），
+  官方原件留作 `src.orig.tar.gz`。workflow 里有一条断言：归档里搜不到 `skip_short_ua` 就红。
 - 编译期关掉 `UA2F_ENABLE_BACKTRACE`（省掉 libbacktrace 那套 autoconf）；UA 由运行时
   `/etc/config/ua2f` 的 `main.custom_ua` 决定（`src/config.c` 读 uci），不写死在二进制里。
 - 设备有 `nft`，init 走 nft 路径：`table inet ua2f`，postrouting `priority mangle -5` 里
