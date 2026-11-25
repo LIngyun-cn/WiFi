@@ -7,13 +7,15 @@ uci -q set wireless.radio1.disabled='0'
 uci -q set wireless.radio0.country='CN'
 uci -q set wireless.radio1.country='CN'
 
-SSID='Ciallo～(∠・ω< )⌒★'
+SSID='IPhone 17'
 PSK='0d00@0721'
+# 旧名字，遇到就顺手改过来说，免得刷机后配置被保留、SSID 还是老样子
+OLD_SSID='Ciallo～(∠・ω< )⌒★'
 
 for s in default_radio0 default_radio1; do
 	cur=$(uci -q get "wireless.$s.ssid")
 	case "$cur" in
-		''|OpenWrt*)
+		''|OpenWrt*|"$OLD_SSID")
 			uci -q set "wireless.$s.ssid=$SSID"
 			uci -q set "wireless.$s.encryption='psk2'"
 			uci -q set "wireless.$s.key=$PSK"
