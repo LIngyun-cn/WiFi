@@ -438,7 +438,7 @@ jobs:
                    etc/init.d/rkp-ipid-mark etc/uci-defaults/90-rkp-ipid \
                    usr/bin/ybu-login etc/init.d/ybu-login etc/config/ybu etc/uci-defaults/95-ybu etc/uci-defaults/96-macclone \
                    etc/init.d/ganyu-guard etc/config/ganyu etc/uci-defaults/97-ganyu etc/uci-defaults/98-wan-sta \
-                   usr/bin/ganyu-status usr/bin/ganyu-watch usr/bin/ganyu-rearm etc/init.d/ganyu-watch \
+                   usr/bin/ganyu-status usr/bin/ganyu-watch usr/bin/ganyu-rearm usr/bin/ganyu-check etc/init.d/ganyu-watch \
                   usr/bin/ybu-wan-gate etc/init.d/ybu-wan-gate \
                    etc/uci-defaults/94-bbr etc/uci-defaults/92-packfix \
                    etc/uci-defaults/87-timezone etc/uci-defaults/88-bindlan etc/uci-defaults/89-wan-hostname \
@@ -458,7 +458,7 @@ jobs:
           # 两个自编内核模块必须落进 /lib/modules
           ls "$ROOT/lib/modules/6.6.144/rkp-ipid.ko" >/dev/null 2>&1 || { echo 'rootfs 里没有 rkp-ipid.ko'; exit 1; }
           ls "$ROOT/lib/modules/6.6.144/tcpts-strip.ko" >/dev/null 2>&1 || { echo 'rootfs 里没有 tcpts-strip.ko'; exit 1; }
-          for f in etc/init.d/ganyu-guard etc/init.d/ybu-login usr/bin/ybu-login etc/init.d/ua2f etc/uci-defaults/93-ua2f etc/uci-defaults/98-wan-sta usr/bin/ganyu-status usr/bin/ganyu-watch usr/bin/ganyu-rearm etc/init.d/ganyu-watch etc/uci-defaults/94-bbr etc/uci-defaults/92-packfix etc/uci-defaults/87-timezone etc/uci-defaults/88-bindlan etc/uci-defaults/89-wan-hostname etc/hotplug.d/iface/96-harden-wan usr/bin/ybu-wan-gate etc/init.d/ybu-wan-gate www/cgi-bin/wake; do
+          for f in etc/init.d/ganyu-guard etc/init.d/ybu-login usr/bin/ybu-login etc/init.d/ua2f etc/uci-defaults/93-ua2f etc/uci-defaults/98-wan-sta usr/bin/ganyu-status usr/bin/ganyu-watch usr/bin/ganyu-rearm usr/bin/ganyu-check etc/init.d/ganyu-watch etc/uci-defaults/94-bbr etc/uci-defaults/92-packfix etc/uci-defaults/87-timezone etc/uci-defaults/88-bindlan etc/uci-defaults/89-wan-hostname etc/hotplug.d/iface/96-harden-wan usr/bin/ybu-wan-gate etc/init.d/ybu-wan-gate www/cgi-bin/wake; do
             test -x "$ROOT/$f" || { echo "$f 没有可执行位"; exit 1; }
           done
 
@@ -491,9 +491,13 @@ jobs:
             echo '97-ganyu 没有启用 ganyu-watch（开机不会体检）'; exit 1; }
           grep -q '/usr/bin/ganyu-rearm' "$ROOT/usr/share/rpcd/acl.d/luci-app-ganyu.json" || {
             echo 'ACL 没放行 ganyu-rearm（页面上的恢复按钮会 403）'; exit 1; }
-          grep -q 'skip_short_ua' "$ROOT/package-src/ua2f/src.tar.gz" 2>/dev/null || \
+          grep -q 'ganyu-check' "$ROOT/usr/share/rpcd/acl.d/luci-app-ganyu.json" || {
+            echo 'ACL 没放行 ganyu-check（重新体检按钮会 403）'; exit 1; }
+          grep -q 'User-Agent' "$ROOT/usr/bin/ganyu-check" || {
+            echo 'ganyu-check 没有 UA 抽查'; exit 1; }
+          grep -q 'ganyu-hist' "$ROOT/usr/bin/ganyu-watch" || {
+            echo 'ganyu-watch 没有历史采样（ganyu-hist）'; exit 1; }
 
-            echo '::warning::无法确认短 UA 补丁（不影响出片）'
 
           # 附加包里有两个"装上就接管网络"的服务：https-dns-proxy 会把 dnsmasq 上游换成
           # 需要外网的 DoH（未认证校园网 → 全部解析超时），mwan3 会把单 WAN 判成 offline。

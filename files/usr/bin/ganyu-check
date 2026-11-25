@@ -1,0 +1,177 @@
+#!/bin/sh
+# ganyu-check —— 主动体检（点按钮才跑，约 10 秒）
+#
+# 跟 ganyu-status 的分工：
+#   ganyu-status  10 秒一次，只看"规则和计数器在不在动" —— 便宜
+#   ganyu-check   手动触发，真抓包 + 主动探针 —— 贵，但能给"实际出网长什么样"的实据
+#
+# 做四件事：
+#   1) 在 WAN 口抓 3 秒（最多 40 包），看 TTL 分布、出网 SYN 有没有 TS
+#   2) 从抓到包里抽明文 HTTP 的 User-Agent，看有没有没被改写的（长度 ≥ 60 且不是我们那个）
+#   3) 探针：向 8.8.8.8:53 发查询，能收到应答说明劫持生效（请求被本机 dnsmasq 接走了）
+#   4) 探针：1.1.1.1 的 443 / 853 应该连不上（DoH / DoT 被封）
+#
+# 结果写 /tmp/ganyu-check.json，同时把发现的问题写进事件流。
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+PCAP=/tmp/ganyu-check.pcap
+OUT=/tmp/ganyu-check.json
+EVENTS=/tmp/ganyu-events.log
+CUSTOM_UA=$(uci -q get ua2f.main.custom_ua)
+[ -n "$CUSTOM_UA" ] || CUSTOM_UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+
+event() {
+	printf '%s [%s] %s\n' "$(date '+%m-%d %H:%M:%S')" "$1" "$2" >>"$EVENTS"
+	[ "$(wc -l <"$EVENTS" 2>/dev/null)" -gt 200 ] 2>/dev/null &&
+		{ tail -n 200 "$EVENTS" >"$EVENTS.t" && mv "$EVENTS.t" "$EVENTS"; }
+}
+
+wan_dev() {
+	local d
+	d=$(ubus -S call network.interface.wan status 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null)
+	[ -n "$d" ] || d=$(uci -q get network.wan.device)
+	echo "$d"
+}
+
+DEV=$(wan_dev)
+[ -n "$DEV" ] || DEV=phy1-sta0
+
+# 只抓"新连接的第一个 SYN"（tcp-syn 置位、tcp-ack 没置位），并且只要出网方向。
+# 为什么不用"全部出网包"：
+#  1) 入向包在路径上已被上游减过 TTL（55/52/51），一比对就误报（第一次上线 28 个包里 15 个"异常"）；
+#  2) 大流量时内核会把数据段聚成 1240 字节的 GSO 超级帧，抓包看到的是分段前的快照，
+#     TTL 还是客户端原来的 128，也会误报（从 LuCI 页面点按钮时抓到过 40 个包里 39 个"异常"）；
+#  3) SYN 很短不会聚合，且每条新连接必然过一次 mangle，用它当探针最干净。
+# -Q out 是 tcpdump 自带的方向约束，不依赖靠 IP 猜。
+# 分两段抓，不要混在一份 pcap 里：
+#   A 段只看新 SYN        → TTL、TS 的证据（SYN 短、不会聚合，读到的 TTL 就是真正出网的 TTL）
+#   B 段只看 80 端口数据  → 明文 UA 的证据
+# 混在一起抓过一次，`-c 20` 会被长连接的 HTTP 数据瞬间填满，一个 SYN 都抓不到（TTL 就永远是 0 样本）。
+SYNF='tcp[tcpflags] & (tcp-syn|tcp-ack) == tcp-syn'
+PCAP80=/tmp/ganyu-check80.pcap
+
+: >"$PCAP"
+: >"$PCAP80"
+
+# 设备上没有 timeout 命令（busybox 不带），用后台抓包 + sleep + kill 控制时长
+tcpdump -i "$DEV" -Q out -s 0 -U -c 10 -w "$PCAP" "$SYNF" >/dev/null 2>&1 &
+TPID=$!
+tcpdump -i "$DEV" -Q out -s 0 -U -c 20 -w "$PCAP80" 'tcp port 80' >/dev/null 2>&1 &
+TPID80=$!
+sleep 4
+kill "$TPID" "$TPID80" 2>/dev/null
+wait "$TPID" 2>/dev/null
+wait "$TPID80" 2>/dev/null
+
+N=$(tcpdump -r "$PCAP" -nn 2>/dev/null | wc -l)
+[ -n "$N" ] || N=0
+N80=$(tcpdump -r "$PCAP80" -nn 2>/dev/null | wc -l)
+[ -n "$N80" ] || N80=0
+
+# 2. TTL 分布（只统计 SYN：数据段会被 GSO 聚成超级帧，抓到的 TTL 是分段前快照，不可信）
+TTL_BAD=0
+TTL_ALL=0
+if [ "$N" -gt 0 ]; then
+	# 注意：tcpdump -v 的 ttl 打在"包头那一行"，而 "Flags [S]" 打在下一行。
+	# 所以不能用 grep 'Flags [S]' 之后再取 ttl（那样一行都取不到，样本恒为 0）。
+	# pcap 里本来就只有 SYN，直接从头行数 ttl 即可。
+	TTL_ALL=$(tcpdump -r "$PCAP" -nn -v 2>/dev/null | grep -c 'ttl ')
+	TTL_BAD=$(tcpdump -r "$PCAP" -nn -v 2>/dev/null | sed -n 's/.*ttl \([0-9]*\).*/\1/p' | grep -vc '^64$')
+	[ -n "$TTL_ALL" ] || TTL_ALL=0
+	[ -n "$TTL_BAD" ] || TTL_BAD=0
+fi
+if [ "$TTL_BAD" -gt 0 ] 2>/dev/null; then
+	event 泄露 "WAN 侧抓到 $TTL_BAD 个 TTL≠64 的包（共 $TTL_ALL 个）"
+fi
+
+# 3. 出网 SYN 是否带 TS
+TS_HIT=0
+if [ "$N" -gt 0 ]; then
+	TS_HIT=$(tcpdump -r "$PCAP" -nn -v 2>/dev/null | grep -c 'TS val')
+fi
+if [ "$TS_HIT" -gt 0 ] 2>/dev/null; then
+	event 泄露 "出网包里有 $TS_HIT 处 TS val（TCP 时间戳没被剥干净）"
+fi
+
+# 4. 明文 HTTP 的 UA 抽查
+UA_LIST=''
+if [ "$N80" -gt 0 ]; then
+	UA_LIST=$(tcpdump -r "$PCAP80" -A 2>/dev/null |
+		sed -n 's/^[[:space:]]*User-Agent: \(.*\)\r$/\1/p' | sort -u | head -n 5)
+fi
+UA_BAD=0
+if [ -n "$UA_LIST" ]; then
+	while IFS= read -r u; do
+		[ -n "$u" ] || continue
+		[ "$u" = "$CUSTOM_UA" ] && continue
+		case "$u" in
+			"$CUSTOM_UA"*"") continue ;;
+		esac
+		len=$(printf '%s' "$u" | wc -c)
+		if [ "$len" -ge 60 ]; then
+			UA_BAD=$((UA_BAD + 1))
+		fi
+	done <<EOF
+$UA_LIST
+EOF
+fi
+if [ "$UA_BAD" -gt 0 ] 2>/dev/null; then
+	event 泄露 "抓到 $UA_BAD 个长度≥60 且不等于 custom_ua 的 UA（可能没被改写）"
+fi
+
+# 5. 探针：8.8.8.8:53（劫持生效则应"有应答"）
+DNS_OK=na
+if command -v nslookup >/dev/null 2>&1; then
+	if nslookup -timeout=3 www.baidu.com 8.8.8.8 >/dev/null 2>&1; then
+		DNS_OK=1
+	else
+		DNS_OK=0
+		event 泄露 '向 8.8.8.8:53 的查询没有拿到应答（DNS 劫持可能没生效）'
+	fi
+fi
+
+# 6. 探针：DoH / DoT 应该连不上（连上 = 封漏了）
+probe_port() { # probe_port host port -> 0 表示连上（坏），非 0 表示连不上（好）
+	if command -v nc >/dev/null 2>&1; then
+		nc -w 3 "$1" "$2" </dev/null >/dev/null 2>&1
+		return $?
+	fi
+	return 1
+}
+DOH_OPEN=0; DOT_OPEN=0
+probe_port 1.1.1.1 443 && { DOH_OPEN=1; event 泄露 '1.1.1.1:443 竟然连得上（DoH 封锁可能失效）'; }
+probe_port 1.1.1.1 853 && { DOT_OPEN=1; event 泄露 '1.1.1.1:853 竟然连得上（DoT 封锁可能失效）'; }
+
+# 7. 输出
+printf '{"ts":"%s","dev":"%s","packets":%s,"ttl_bad":%s,"ts_hits":%s,"ua_bad":%s,"dns_probe":"%s","doh_open":%s,"dot_open":%s}\n' \
+	"$(date '+%Y-%m-%d %H:%M:%S')" "$DEV" "$N" "$TTL_BAD" "$TS_HIT" "$UA_BAD" "$DNS_OK" "$DOH_OPEN" "$DOT_OPEN" >"$OUT"
+
+echo "主动体检  $(date '+%H:%M:%S')   抓包 $DEV ${N} 个包"
+echo '────────────────────────────────────────────'
+# 出现非 64 就把那几行留下，便于下次直接看是谁（IPv6 的 hlim、分片、还是真漏改）
+[ "$TTL_BAD" -gt 0 ] 2>/dev/null && tcpdump -vnr "$PCAP" 2>/dev/null | grep 'ttl ' | grep -v 'ttl 64' | head -5 >/tmp/ganyu-check.bad
+if [ "$TTL_ALL" -eq 0 ]; then
+	echo "[N/A]  TTL      4 秒内没有新的出网 SYN（浏览器点按钮时会有；命令行可先开个网页再跑）"
+elif [ "$TTL_BAD" -eq 0 ]; then
+	echo "[PASS] TTL      $TTL_ALL/$TTL_ALL 个出网 SYN 都是 64"
+else
+	echo "[FAIL] TTL      $TTL_BAD/$TTL_ALL 个出网 SYN 的 TTL≠64"
+fi
+[ "$TS_HIT" -eq 0 ] 2>/dev/null && echo '[PASS] 时间戳   抓到包里没有 TS val' ||
+	echo "[FAIL] 时间戳   $TS_HIT 处 TS val"
+if [ "$UA_BAD" -eq 0 ] 2>/dev/null; then
+	echo '[PASS] UA       没有可疑的未改写 UA'
+else
+	echo "[FAIL] UA       $UA_BAD 个长度≥60 且不等于 custom_ua"
+fi
+case "$DNS_OK" in
+	1) echo '[PASS] DNS 探针 8.8.8.8:53 的请求被本机接走了（劫持生效）' ;;
+	0) echo '[FAIL] DNS 探针 8.8.8.8:53 无应答' ;;
+	*) echo '[ NA ] DNS 探针 没有 nslookup' ;;
+esac
+[ "$DOH_OPEN" -eq 0 ] && echo '[PASS] DoH      1.1.1.1:443 连不上' || echo '[FAIL] DoH      1.1.1.1:443 竟然通了'
+[ "$DOT_OPEN" -eq 0 ] && echo '[PASS] DoT      1.1.1.1:853 连不上' || echo '[FAIL] DoT      1.1.1.1:853 竟然通了'
+[ -n "$UA_LIST" ] && { echo '────────────────────────────────────────────'; echo '抓到的 UA：'; printf '%s\n' "$UA_LIST"; }
+
+exit 0

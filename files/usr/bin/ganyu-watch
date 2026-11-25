@@ -21,6 +21,7 @@ EVENTS=/tmp/ganyu-events.log
 REARM=/tmp/ganyu-rearm
 ALARM=/tmp/ganyu-alarm
 CNT=/tmp/ganyu-watch.cnt
+HIST=/tmp/ganyu-hist
 
 # 连续几轮才动手（60 秒一轮 → 3 轮 = 3 分钟）
 CONFIRM=3
@@ -28,7 +29,7 @@ CONFIRM=3
 # 这些项 fail 会断网。P0（核心链路断了等于裸奔）+ P1（已确认的泄露：
 # DNS 劫持规则没了、DoT 放行了、IPv6 出去了），按"宁停勿漏"处理。
 # 注意这里只认 fail：像"规则在但还没命中"这类是 warn，不会触发断网。
-KILL_IDS="ipid_ko ipid_rule ttl_rule tcpts ua2f_run v6 dns dot"
+KILL_IDS="ipid_ko ipid_rule ttl_rule tcpts ua2f_run v6 dns dot doh ntp"
 
 log() { logger -t ganyu-watch "$*"; }
 
@@ -135,6 +136,23 @@ guard_link() {
 	clear_one link
 }
 
+# 每小时的分段历史：每轮把 5 个计数写一行，环形 60 行（= 1 小时）
+# 用途：判断"停了没"。计数 3 分钟不动但客户端还在上网 = 规则被绕过，
+# 光看累计值一辈子发现不了。
+hist() {
+	local ipd tt uaq dns v6 line
+	ipd=$(iptables -t mangle -L IPID_MOD -n -v 2>/dev/null | awk '/MARK/ {print $1; exit}')
+	tt=$(nft list table ip ganyu 2>/dev/null | awk '/ttl set 64/ {for (i = 1; i <= NF; i++) if ($i == "packets") print $(i + 1)}' | head -n 1)
+	uaq=$(nft list table inet ua2f 2>/dev/null | awk '/counter packets/ {for (i = 1; i <= NF; i++) if ($i == "packets") v = $(i + 1)} END {print (v == "" ? 0 : v)}')
+	dns=$(nft list table ip ganyu 2>/dev/null | awk '/dport 53/ {for (i = 1; i <= NF; i++) if ($i == "packets") s += $(i + 1)} END {print (s == "" ? 0 : s)}')
+	v6=$(ip -6 addr show dev "$(ip -4 route | awk '/^default/ {print $5; exit}')" 2>/dev/null | grep -c 'scope global')
+	line="$(date '+%H:%M') ${ipd:-0} ${tt:-0} ${uaq:-0} ${dns:-0} ${v6:-0}"
+	printf '%s\n' "$line" >>"$HIST"
+	if [ "$(wc -l <"$HIST" 2>/dev/null)" -gt 60 ] 2>/dev/null; then
+		tail -n 60 "$HIST" >"$HIST.t" && mv "$HIST.t" "$HIST"
+	fi
+}
+
 cycle() {
 	local id n reason=''
 
@@ -149,6 +167,7 @@ cycle() {
 
 	# 先看网络本身通不通（僵尸关联），再看规则对不对
 	guard_link
+	hist
 
 	[ -f "$VERDICT" ] || /usr/bin/ganyu-status --verdict >/dev/null 2>&1
 

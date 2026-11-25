@@ -73,9 +73,30 @@ return view.extend({
 			}).catch(function() {});
 		}, 10);
 
+		var check_out = E('pre', {
+			'style': 'display:none;font-family:monospace;font-size:12px;white-space:pre-wrap;' +
+				'margin:10px 0 0 0;padding:8px;background:#f7f7f7;border:1px solid #ddd'
+		});
+
+		var btn2 = E('button', {
+			'class': 'btn cbi-button',
+			'style': 'margin-left:8px',
+			'click': ui.createHandlerFn(this, function() {
+				btn2.disabled = true;
+				check_out.style.display = '';
+				check_out.textContent = _('正在抓包 3 秒并做主动探针…');
+				return fs.exec('/usr/bin/ganyu-check').then(function(res) {
+					check_out.textContent = (res && res.stdout) ? res.stdout : _('（无输出）');
+				}).catch(function(err) {
+					check_out.textContent = _('体检失败：') + (err.message || String(err));
+				}).finally(function() { btn2.disabled = false; });
+			})
+		}, [ _('重新体检（抓包 3 秒）') ]);
+
 		return E([], [
 			title,
-			E('div', { 'style': 'margin:6px 0 10px 0' }, [ btn ]),
+			E('div', { 'style': 'margin:6px 0 10px 0' }, [ btn, btn2 ]),
+			check_out,
 			host
 		]);
 	},

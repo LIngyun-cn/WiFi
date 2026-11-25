@@ -153,7 +153,7 @@ sta_info() {
 # ---- 判定 ----------------------------------------------------------------
 
 checks() {
-	local ipd tt ttl dns_u dns_t uaq off hn wanauto tcpst
+	local ipd tt ttl dns_u dns_t uaq off hn wanauto tcpst stp nsrv ntp_run
 
 	ipd=$(ipid_pkts)
 	tt=$(nft_counts)
@@ -194,7 +194,13 @@ checks() {
 	# 6. TCP 时间戳
 	if [ -d /sys/module/tcpts_strip ]; then
 		tcpst=$(cat /sys/module/tcpts_strip/parameters/strip_syn 2>/dev/null)
-		chk tcpts pass 'TCP 时间戳' "tcpts_strip 已加载，strip_syn=${tcpst:-?}"
+		# 内核每翻倍打一行统计，取最后一行的累计数当证据（剥过几个 SYN）
+		stp=$(dmesg 2>/dev/null | sed -n 's/.*tcpts-strip: stripped \([0-9]*\) SYNs.*/\1/p' | tail -n 1)
+		if [ "${stp:-0}" -gt 0 ] 2>/dev/null; then
+			chk tcpts pass 'TCP 时间戳' "tcpts_strip 已加载，strip_syn=${tcpst:-?}，已剥 ${stp} 个 SYN"
+		else
+			chk tcpts pass 'TCP 时间戳' "tcpts_strip 已加载，strip_syn=${tcpst:-?}（还没剥到 SYN）"
+		fi
 	else
 		chk tcpts fail 'TCP 时间戳' 'tcpts_strip 未加载，出网 SYN 会带 TS'
 	fi
@@ -221,6 +227,29 @@ checks() {
 		chk dot pass 'DoT 封锁' '853 规则在（命中 0 属正常）'
 	else
 		chk dot fail 'DoT 封锁' 'table ip ganyu 不存在'
+	fi
+
+	# 11. DoH 封锁（规则里必须有那几个公共解析器的 443 drop）
+	if nft list table ip ganyu 2>/dev/null | grep -q 'dport 443'; then
+		chk doh pass 'DoH 封锁' '已知公共 DoH 解析器的 443 已 drop'
+	elif [ "$(uci -q get ganyu.main.block_doh)" = "0" ]; then
+		chk doh warn 'DoH 封锁' '配置里关掉了（客户端可绕开 53 劫持）'
+	else
+		chk doh fail 'DoH 封锁' '规则不在，浏览器可走 DoH 绕开 DNS 劫持'
+	fi
+
+	# 12. NTP 归本机（客户端 123 重定向到本机 ntpd）
+	local nsrv ntp_run
+	nsrv=$(uci -q get system.ntp.enable_server)
+	ntp_run=$(pidof ntpd | awk '{print $1}')
+	if [ "$(uci -q get ganyu.main.block_ntp)" = "0" ]; then
+		chk ntp warn 'NTP 归本机' '配置里关掉了，客户端可自带时间源'
+	elif nft list table ip ganyu 2>/dev/null | grep -q 'dport 123'; then
+		chk ntp pass 'NTP 归本机' "123 重定向在，enable_server=${nsrv:-0}，ntpd=${ntp_run:-未运行}"
+	elif [ "$nsrv" = "1" ] && [ -n "$ntp_run" ]; then
+		chk ntp warn 'NTP 归本机' 'ntpd 在但 123 重定向规则丢了'
+	else
+		chk ntp fail 'NTP 归本机' "enable_server=${nsrv:-0}，ntpd=${ntp_run:-未运行}"
 	fi
 
 	# 11. IPv6 兜底

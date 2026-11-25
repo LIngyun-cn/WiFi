@@ -1,0 +1,14 @@
+feat: 体检加 DoH/NTP 判定、主动抓包体检、一小时历史采样
+
+- ganyu-status：16 项 → 18 项，新增 DoH 封锁、NTP 归本机；TCP 时间戳那项带上 dmesg 里已剥 SYN 的累计数
+- 新脚本 ganyu-check：点按钮才跑，抓 3 秒包做实测证据（TTL 抽样 / TS val / 明文 UA / DNS 探针 / DoH / DoT），结果落 /tmp/ganyu-check.json
+- ganyu-watch：每轮写一行 /tmp/ganyu-hist（ipid ttl ua2f dns v6，环形 60 行 = 1 小时），用来发现"计数不动但规则还在"的静默失效
+- 状态页加「重新体检（抓包 3 秒）」按钮，结果渲染在下方 pre 里
+- ACL 放行 ganyu-check
+
+抓包这段踩了三个坑，都写进注释了：
+1) 不加方向过滤时把入向包算进来（上游已减过 TTL），28 个包里 15 个"异常"
+2) 大流量时数据段被聚成 1240 字节 GSO 超级帧，抓到的 TTL 是分段前快照，页面点按钮时 40 个包里 39 个"异常"
+3) tcpdump -v 的 ttl 打在包头行、Flags [S] 打在地址行，按 Flags [S] 过滤后取 ttl 会得到空样本
+
+现在改成：SYN 段（-Q out，只抓新连接）+ 80 端口段分开抓；TTL 只统计 SYN；没有 SYN 时如实报 N/A 而不是 PASS
