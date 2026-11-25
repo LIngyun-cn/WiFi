@@ -30,3 +30,9 @@ config main 'main'
 	option wake_to '0915'
 	option wake_from_weekend '0830'
 	option wake_to_weekend '1100'
+	# 早触发：门禁等待期间若监测到有客户端第一次接入我们的 AP（说明人来了），
+	# 立刻放弃等待、直接起网；每天只允许抢跑一次（标记写 /etc/ybu-gate-early.date）。
+	option early_trigger '1'
+	# 静默期：开机后先等这么多秒让"自动重连的旧设备"连完，把它们记为背景设备，
+	# 之后才出现的新 MAC 才算"有设备接入"，避免手机自己重连就误判成人在场。
+	option early_settle '120'

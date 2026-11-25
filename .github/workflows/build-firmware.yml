@@ -529,6 +529,12 @@ jobs:
             echo '::error::/etc/config/ybu 缺少 wan_gate 开关'; exit 1; }
           grep -q "CST-8" "$ROOT/etc/uci-defaults/87-timezone" || {
             echo '::error::87-timezone 没把时区设成 CST-8（起床区间会偏 8 小时）'; exit 1; }
+          grep -q 'early_used_today' "$ROOT/usr/bin/ybu-wan-gate" || {
+            echo '::error::ybu-wan-gate 缺少早触发的"每天一次"限制'; exit 1; }
+          grep -q 'ybu-gate-early.date' "$ROOT/usr/bin/ybu-wan-gate" || {
+            echo '::error::ybu-wan-gate 没有把早触发日期持久化到 /etc'; exit 1; }
+          grep -q "option early_trigger" "$ROOT/etc/config/ybu" || {
+            echo '::error::/etc/config/ybu 缺少 early_trigger 开关'; exit 1; }
           grep -q '{ 80, 8080 }' "$ROOT/etc/init.d/ua2f" || {
             echo '::error::ua2f 没有覆盖 8080 端口'; exit 1; }
 

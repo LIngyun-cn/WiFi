@@ -1,29 +1,52 @@
 #!/bin/sh
 #
-# 起网门禁：开机后不立刻把 WAN 拉起来。
+# 起网门禁 + 早触发
 #
-# 为什么要这么做（2026-11-25 用户指出的真问题）：
+# 背景（2026-11-25 用户指出的真问题）：
 #   宿舍 23:00 断电、次日 5–6 点来电。路由器一上电就 wpa 关联 + DHCP + 门户认证，
-#   网管侧看到的是「某 MAC 每天 05:0x 准点出现、误差几十秒，且天天如此」——
-#   这比 TTL/IPID 之类协议指纹直白得多，属于行为层证据。
-#   只延迟"登录"是不够的：没认证的设备照样会 DHCP 拿地址、进 ARP/邻居表，
-#   在校园网侧一样是"每天 5 点准时开机"。
+#   网管侧看到「某 MAC 每天 05:0x 准点出现、误差几十秒」，属于行为层铁证。
+#   只延迟"登录"没用 —— 没认证的设备照样 DHCP/ARP，一样是"每天 5 点准时开机"。
+#   所以连 WAN 的起网都推迟到随机时刻（network.wan.auto=0，由 98-wan-sta 写入）。
 #
-# 所以这里把整条 WAN 的起网都推迟：network.wan.auto=0（由 98-wan-sta 写死），
-# 本脚本睡一个从"人类起床区间"里抽的随机时长，再 ifup wan。
-#   · 工作日 06:45–09:15、周末 08:30–11:00，按分钟均匀采样
-#   · 若当前时刻已过该区间（中午才来电），只等 60–360 秒
-#   · 任何异常（算不出来 / ifup 失败）立刻 ifup，绝不把网络卡死
+# 但"死等随机时刻"有个明显缺陷：人要是早起了，5:40 就到宿舍开电脑，
+# 结果要等到 7 点多才有网 —— 这既反人性，也会让"路由器每天固定时刻上线"
+# 变成"路由器每天固定时刻上线、且从不理会有人在场"。
 #
-# 与 portal 登录的关系：WAN 起来后 ybu-login 的 daemon 会立刻认证，
-# 此时 ybu-login 的"开机门禁"自动跳过（见 ybu-login 里 wan_gate 判断），
-# 避免叠加出"6:45 连上、9:00 才登录"这种反倒奇怪的组合。
+# 所以加早触发：门禁等待期间，如果监测到有客户端第一次接入我们的 AP，
+# 说明"人来了"，立刻放弃等待、直接 ifup，且 **每天只允许早触发一次**。
+#
+#   工作日 06:45–09:15 / 周末 08:30–11:00 之间 → 正常门禁时刻起网
+#   区间之前有人接入 → 立刻起网（当天第一次，之后不再抢跑）
+#   区间之后（中午才来电）→ 60–360 秒随机抖动后起网
+#
+# 早触发的判定细节（避免"手机自己重连"被误当成人在场）：
+#   · 开机先等 early_settle 秒（默认 120）让自动重连的设备先连完，
+#     把这批 MAC 记成"背景设备"（/tmp，掉电即清）；
+#   · 之后才出现的、不在背景集合里的 MAC → 才算"有设备接入了"。
+#     手机在通电瞬间自动连回来的情形会被归进背景，不会误触发。
+#   · 每天一次的标记写 /etc/ybu-gate-early.date（overlay，掉电不丢），
+#     内容就是当天日期；同一天第二次起不再抢跑。
 
 . /lib/functions.sh
 
 log() { logger -t ybu-wan-gate "$*"; echo "$*"; }
 
 c() { uci -q get ybu.main.$1; }
+
+# 客户端关联列表（只取 MAC 列）。测试时可用 YBU_TEST_ASSOC 覆盖，便于离线验证触发逻辑。
+assoc_macs() {
+	if [ -n "$YBU_TEST_ASSOC" ]; then
+		printf '%s\n' "$YBU_TEST_ASSOC"
+		return 0
+	fi
+	local i
+	for i in phy0-ap0 phy1-ap0; do
+		# 只取 MAC 列：iwinfo 输出形如
+		#   AA:BB:CC:DD:EE:FF  -45 dBm / -95 dBm (SNR 50)  120 ms ago
+		# 这里不用 {5} 区间量词（busybox awk 对它支持不稳），只认"带冒号的第一列"。
+		iwinfo "$i" assoclist 2>/dev/null | awk 'NF >= 2 && $1 ~ /:/ {print tolower($1)}'
+	done
+}
 
 ifup_wan() {
 	local i
@@ -34,23 +57,74 @@ ifup_wan() {
 	return 1
 }
 
+# 今天是否已经早触发过
+early_used_today() {
+	local today f
+	today=$(date +%Y%m%d)
+	f=/etc/ybu-gate-early.date
+	[ -f "$f" ] || return 1
+	[ "$(cat "$f" 2>/dev/null)" = "$today" ]
+}
+
+mark_early_used() {
+	date +%Y%m%d >/etc/ybu-gate-early.date
+}
+
 W=$(/usr/bin/ybu-login wakewait 2>/dev/null)
 case "$W" in
 '' | *[!0-9]*) W=120 ;;
 esac
-# 上限 4 小时，防止某个 uci 配置写错把网络推迟一整天
 [ "$W" -gt 14400 ] && W=14400
 
-log "起网门禁：本次等 ${W} 秒（$((W / 60)) 分钟）再拉起 WAN"
+EARLY=$(c early_trigger)
+[ -n "$EARLY" ] || EARLY=1
+SETTLE=$(c early_settle)
+case "$SETTLE" in
+'' | *[!0-9]*) SETTLE=120 ;;
+esac
+[ "$SETTLE" -gt 600 ] && SETTLE=600
 
+log "起网门禁：本次等 ${W} 秒（$((W / 60)) 分钟）再拉起 WAN；早触发=${EARLY}，静默期=${SETTLE}s"
+
+# 静默期：先让自动重连的旧设备连完，避免把"手机自己连回来"当成人在场
 i=0
+while [ "$i" -lt "$SETTLE" ] && [ "$i" -lt "$W" ]; do
+	sleep 10
+	i=$((i + 10))
+done
+assoc_macs >/tmp/ybu-gate.base 2>/dev/null
+log "背景设备 $(( $(wc -l </tmp/ybu-gate.base 2>/dev/null || echo 0) )) 台（$(tr '\n' ' ' </tmp/ybu-gate.base 2>/dev/null)）"
+
+early=0
 while [ "$i" -lt "$W" ]; do
-	sleep 30
-	i=$((i + 30))
+	if [ "$EARLY" = "1" ] && [ "$early" -eq 0 ] && ! early_used_today; then
+		# 别用 awk 'NR==FNR' 双文件比较：基线文件为空时 NR 永远等于 FNR，
+		# 后面的输入会被当成"第一个文件"吞掉，新设备永远匹配不出来（实测踩过）。
+		# 也别用 grep -vxF -f 空文件（busybox 行为不可靠）。就老老实实逐个比。
+		new=""
+		for m in $(assoc_macs); do
+			grep -qxF "$m" /tmp/ybu-gate.base 2>/dev/null || {
+				new="$m"
+				break
+			}
+		done
+		if [ -n "$new" ]; then
+			log "早触发：门禁期间检测到新设备接入（$new），放弃等待，立即起网（今天仅此一次）"
+			mark_early_used
+			early=1
+			break
+		fi
+	fi
+	sleep 10
+	i=$((i + 10))
 done
 
 if ifup_wan; then
-	log "WAN 已拉起（门禁结束）"
+	if [ "$early" -eq 1 ]; then
+		log "WAN 已拉起（早触发）"
+	else
+		log "WAN 已拉起（门禁结束）"
+	fi
 else
 	log "WAN 拉起失败，再试一次 ifup wan"
 	ifup wan >/dev/null 2>&1
