@@ -70,6 +70,7 @@ fi
 EARLY=$(c early_trigger)
 [ -n "$EARLY" ] || EARLY=1
 
+: > /tmp/ybu-gate-ran
 log "起网门禁：本次等 ${W} 秒（$((W / 60)) 分钟）再拉起 WAN；连上即插队=${EARLY}；手动入口 http://192.168.1.1/cgi-bin/wake"
 
 # 清掉上一轮遗留的手动起网标记（否则一开机会立刻起网）

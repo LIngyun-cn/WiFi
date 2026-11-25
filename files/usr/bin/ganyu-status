@@ -88,6 +88,11 @@ prev_get() { # prev_get key -> 上次的值，取不到给空
 delta_of() { # delta_of key current -> 打印 +N / 首次采样
 	local old
 	old=$(prev_get "$1")
+	# 两个都得是纯数字才算差值：计数器取不到时（链刚丢、进程刚没）会是空串，
+	# 直接进 $(( )) 会打 "arithmetic syntax error" 到 stderr，吓人且没用。
+	case "$old$2" in
+		''|*[!0-9]*) echo "首次采样"; return 0 ;;
+	esac
 	if [ -z "$old" ]; then
 		echo "首次采样"
 	else
@@ -115,6 +120,9 @@ wan_ip() {
 	echo "${ip:-无地址}"
 }
 
+wan_is_up() {
+	[ "$(ifstatus wan 2>/dev/null | jsonfilter -e '@.up' 2>/dev/null)" = "true" ] && echo 1 || echo 0
+}
 v6_global() {
 	local d
 	d=$(wan_dev)
@@ -298,6 +306,33 @@ checks() {
 		chk gate pass '起网门禁' 'network.wan.auto=0，由 ybu-wan-gate 决定什么时候起网'
 	else
 		chk gate warn '起网门禁' "network.wan.auto=${wanauto:-未设置}，开机会立刻起网"
+	fi
+
+	# 15b. 门禁有没有真的跑起来
+	# 判据：门禁进程在，或者它启动时写的 /tmp/ybu-gate-ran 还在。
+	# WAN 已经 up、又找不到这两样，说明这次开机门禁根本没执行 —— 那就是"准点上线"的复发。
+	local gran=''
+	[ -f /tmp/ybu-gate-ran ] && gran=1
+	if [ "$wanauto" = "0" ] && [ "$(wan_is_up)" = "1" ]; then
+		if [ -n "$gran" ] || pidof ybu-wan-gate >/dev/null 2>&1; then
+			chk gate_ran pass '门禁执行' '门禁跑过（或正在等窗口），WAN 不是自己爬起来的'
+		else
+			chk gate_ran fail '门禁执行' 'WAN 已 up 但门禁没跑过（准点上线复发）'
+		fi
+	else
+		chk gate_ran na '门禁执行' 'WAN 还没起，或门禁没开'
+	fi
+
+	# 15c. WAN 侧有没有被放进来新东西
+	# fw4 的 input_wan 默认只放 dhcp/icmp/igmp/mld 这几条，多出任何 accept 都是我们自己加的口子。
+	local wan_acc
+	wan_acc=$(nft list chain inet fw4 input_wan 2>/dev/null |
+		grep -E 'accept' |
+		grep -vE 'udp dport (68|546)|icmp|igmp|mld|dhcpv6|jump' | head -n 2)
+	if [ -n "$wan_acc" ]; then
+		chk wan_open warn 'WAN 入向' "input_wan 里有额外放行：$(echo "$wan_acc" | tr '\n' ' ' | cut -c1-60)"
+	else
+		chk wan_open pass 'WAN 入向' 'input_wan 只放 dhcp/icmp/mld（默认策略）'
 	fi
 
 	# 16. 保留服务

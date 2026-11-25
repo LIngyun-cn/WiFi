@@ -497,6 +497,13 @@ jobs:
             echo 'ganyu-check 没有 UA 抽查'; exit 1; }
           grep -q 'ganyu-hist' "$ROOT/usr/bin/ganyu-watch" || {
             echo 'ganyu-watch 没有历史采样（ganyu-hist）'; exit 1; }
+          # 门禁执行 / WAN 入向两项（体检第 15b、15c）：写错了就等于没有这两条约等于没有这层保险
+          grep -q 'gate_ran' "$ROOT/usr/bin/ganyu-status" || {
+            echo 'ganyu-status 没有门禁执行判定（准点上线复发会漏报）'; exit 1; }
+          grep -q 'wan_open' "$ROOT/usr/bin/ganyu-status" || {
+            echo 'ganyu-status 没有 WAN 入向判定'; exit 1; }
+          grep -q 'ybu-gate-ran' "$ROOT/usr/bin/ybu-wan-gate" || {
+            echo 'ybu-wan-gate 没有写 /tmp/ybu-gate-ran 标记'; exit 1; }
 
 
           # 附加包里有两个"装上就接管网络"的服务：https-dns-proxy 会把 dnsmasq 上游换成
