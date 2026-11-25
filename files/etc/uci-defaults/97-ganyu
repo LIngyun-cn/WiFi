@@ -1,8 +1,13 @@
 #!/bin/sh
-# 首次启动启用防检测规则集。
+# 首次启动启用反检测规则集与后台体检。
 # 规则本身在 /etc/init.d/ganyu-guard 里按 /etc/config/ganyu 的开关执行。
+
 [ -x /etc/init.d/ganyu-guard ] && {
 	/etc/init.d/ganyu-guard enable
 	/etc/init.d/ganyu-guard restart
 }
+
+# 后台体检（60 秒一轮；判定致命项连续 3 轮没修好就断 WAN）
+[ -x /etc/init.d/ganyu-watch ] && /etc/init.d/ganyu-watch enable
+
 exit 0

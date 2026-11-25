@@ -1,9 +1,17 @@
 {
 	"luci-app-ganyu": {
-		"description": "Grant read access to the ganyu anti-detection status page",
+		"description": "Grant access to the ganyu anti-detection status page and its rearm button",
 		"read": {
 			"file": {
 				"/usr/bin/ganyu-status": [ "exec" ]
+			},
+			"ubus": {
+				"file": [ "exec" ]
+			}
+		},
+		"write": {
+			"file": {
+				"/usr/bin/ganyu-rearm": [ "exec" ]
 			},
 			"ubus": {
 				"file": [ "exec" ]

@@ -1,0 +1,16 @@
+#!/bin/sh
+# ganyu-rearm —— 从 LuCI 状态页的「恢复」按钮调用（rpcd 以 root 执行）
+#
+# 只做两件事：把 kill 掉的状态撤掉（重新启用 WAN），并告诉 ganyu-watch
+# 把连续失败计数清零。故意做成独立小脚本：rpcd 的 ACL 是按"命令路径 + exec"
+# 授予的，直接放 /etc/init.d/ganyu-guard 给页面，等于把整个 init 脚本
+# （含所有子命令）都开给页面了。
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+: >/tmp/ganyu-rearm               # 给 ganyu-watch 的信号：恢复并清零计数
+rm -f /tmp/ganyu-alarm
+/etc/init.d/ganyu-guard rearm >/dev/null 2>&1
+
+logger -t ganyu-rearm "收到页面恢复请求"
+echo '已请求恢复：WAN 正在重新启用'

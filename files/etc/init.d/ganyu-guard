@@ -19,11 +19,14 @@
 
 START=98
 STOP=11
-EXTRA_COMMANDS="status"
-EXTRA_HELP="	status	打印 nft 表与命中计数"
+EXTRA_COMMANDS="status killit rearm"
+EXTRA_HELP="	status	打印 nft 表与命中计数
+	killit	出事时断网（只断 WAN，LAN 全保留）
+	rearm	恢复：重新启用 WAN 并重启门户守护"
 
 CONF=ganyu
 TABLE=ganyu
+KILL_TABLE=ganyu_kill
 AC_CHAIN=GANYU_AC
 V6_CHAIN=drop6
 IN_CHAIN=gin
@@ -215,9 +218,7 @@ ensure_canary() {
 # ——因为 restart ganyu-guard 时 WAN 早就 up 了，不会再有 ifup 事件。
 harden_wan() {
 	local dev
-	dev=$(ubus -S call network.interface.wan status 2>/dev/null |
-		jsonfilter -e '@.l3_device' 2>/dev/null)
-	[ -n "$dev" ] || dev=$(uci -q get network.wan.device)
+	dev=$(wan_dev)
 	[ -n "$dev" ] || return 0
 	[ -d "/proc/sys/net/ipv6/conf/$dev" ] || return 0
 
@@ -230,6 +231,70 @@ harden_wan() {
 		[ -w "$f" ] && echo 0 > "$f"
 	done
 	log "harden_wan: $dev 已关掉 v6 转发/重定向/SLAAC（不再 join ff02::2）"
+}
+
+wan_dev() {
+	local dev
+	dev=$(ubus -S call network.interface.wan status 2>/dev/null |
+		jsonfilter -e '@.l3_device' 2>/dev/null)
+	[ -n "$dev" ] || dev=$(uci -q get network.wan.device)
+	echo "$dev"
+}
+
+# ---- 出事断网（fail-closed）---------------------------------------------
+#
+# 只断 WAN，LAN 一点不动：SSH / LuCI / DNS / DHCP 全部照常，你能进去看、
+# 能一键恢复。做法分三层，确保"断得干净、也不会自己偷偷爬回来"：
+#
+#   1. uci network.wan.disabled=1 + commit —— 这是持久的，重启后依然不连
+#   2. ifdown wan —— 立刻把 STA 断开，校园网侧看到的就是"设备下线"
+#   3. nft 表 ip ganyu_kill 把出 WAN 的包全 drop —— 万一 netifd/watchdog
+#      又把接口拉起来，包也出不去（第二道闸）
+#
+# 顺带停掉 ybu-login（否则它每分钟探测、发现离线又去重登）。
+killit() {
+	local reason="$*" dev
+	[ -n "$reason" ] || reason='未说明原因'
+	if nft list table ip "$KILL_TABLE" >/dev/null 2>&1; then
+		log "killit: 已经处于断网状态，跳过（新原因：$reason）"
+		return 0
+	fi
+
+	dev=$(wan_dev)
+
+	uci -q set network.wan.disabled='1'
+	uci -q commit network
+	ifdown wan 2>/dev/null
+
+	nft delete table ip "$KILL_TABLE" 2>/dev/null
+	if nft add table ip "$KILL_TABLE"; then
+		nft "add chain ip $KILL_TABLE out { type filter hook output priority 0; policy accept; }" ||
+			log "ERROR: 建 $KILL_TABLE out 链失败"
+		if [ -n "$dev" ]; then
+			nft add rule ip "$KILL_TABLE" out oifname "$dev" counter drop
+		fi
+		# 接口名兜底：有线模式是 eth0.1、无线 STA 是 phy1-staN，两个都堵上
+		nft add rule ip "$KILL_TABLE" out oifname "eth0.1" counter drop 2>/dev/null
+		nft add rule ip "$KILL_TABLE" out oifname "phy1-sta*" counter drop 2>/dev/null
+	else
+		log "ERROR: 建 $KILL_TABLE 表失败，只能靠 ifdown 兜着"
+	fi
+
+	/etc/init.d/ybu-login stop 2>/dev/null
+	/etc/init.d/ybu-wan-gate stop 2>/dev/null
+
+	printf '%s\n' "$(date '+%F %T') $reason" >/tmp/ganyu-alarm
+	log "killit: 已断 WAN（$reason）；LAN/SSH 不受影响，ganyu-guard rearm 可恢复"
+}
+
+rearm() {
+	nft delete table ip "$KILL_TABLE" 2>/dev/null
+	uci -q set network.wan.disabled='0'
+	uci -q commit network
+	ifup wan 2>/dev/null
+	/etc/init.d/ybu-login start 2>/dev/null
+	rm -f /tmp/ganyu-alarm
+	log "rearm: WAN 已重新启用"
 }
 
 start() {

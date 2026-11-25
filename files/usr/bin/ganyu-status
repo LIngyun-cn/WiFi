@@ -1,38 +1,42 @@
 #!/bin/sh
-# ganyu-status —— 反检测链路实时状态（只读）
+# ganyu-status —— 反检测链路体检（只读，永远 exit 0）
 #
-# 供 LuCI 视图 /www/luci-static/resources/view/ganyu/status.js 调用。
-# 全部取数都做了容错：没装包、没建表、没接口、没 STA 时一律显示 n/a，
-# 脚本本身永远 exit 0，不会因为某一条命令失败就把整个页面拖垮。
+# 三种用法：
+#   ganyu-status            人看的纯文本（ssh 里直接跑）
+#   ganyu-status --json     LuCI 视图用（/www/luci-static/resources/view/ganyu/status.js）
+#   ganyu-status --verdict  给 ganyu-watch 用（每行 "id state msg"，msg 里可能有空格）
+#
+# 设计要点：
+#   1) 每项都给判定（pass/warn/fail/na），不给结论的计数等于没测；
+#   2) 计数器是历史累计，光看它分不出"规则在但没生效"，所以带"两次采样差值"；
+#   3) 任何一条命令失败都不许把脚本搞崩，缺包/缺表一律 na。
 
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 
+PREV=/tmp/ganyu-prev
+VERDICT=/tmp/ganyu-verdict
+EVENTS=/tmp/ganyu-events.log
+
+N_PASS=0; N_WARN=0; N_FAIL=0; N_NA=0
+ITEMS=''
+
+# state: pass / warn / fail / na；msg 里不要出现双引号和反斜杠
+chk() {
+	local id="$1" state="$2" name="$3" msg="$4"
+	msg=$(printf '%s' "$msg" | tr -d '"\\' | tr '\n' ' ')
+	case "$state" in
+		pass) N_PASS=$((N_PASS + 1)) ;;
+		warn) N_WARN=$((N_WARN + 1)) ;;
+		fail) N_FAIL=$((N_FAIL + 1)) ;;
+		*)    N_NA=$((N_NA + 1)); state=na ;;
+	esac
+	printf '%s %s %s\n' "$id" "$state" "$msg" >>"$VERDICT"
+	ITEMS="$ITEMS$id|$state|$name|$msg
+"
+}
+
 # ---- 取数 ----------------------------------------------------------------
 
-# IPID：内核模块是否加载
-ko_state() {
-	if [ -d /sys/module/rkp_ipid ]; then
-		echo "已加载"
-	else
-		echo "未加载"
-	fi
-}
-
-# IPID：OUTPUT / FORWARD 上是否挂着 IPID_MOD
-jump_state() {
-	local o f
-	o=$(iptables -t mangle -S OUTPUT 2>/dev/null | grep -c -- '-j IPID_MOD')
-	f=$(iptables -t mangle -S FORWARD 2>/dev/null | grep -c -- '-j IPID_MOD')
-	[ -n "$o" ] || o=0
-	[ -n "$f" ] || f=0
-	if [ "$o" -gt 0 ] 2>/dev/null && [ "$f" -gt 0 ] 2>/dev/null; then
-		echo "OUTPUT + FORWARD 已挂"
-	else
-		echo "未挂载 (OUT=$o FWD=$f)"
-	fi
-}
-
-# IPID：MARK 规则命中的包数
 ipid_pkts() {
 	local n
 	n=$(iptables -t mangle -L IPID_MOD -n -v 2>/dev/null | awk '/MARK/ {print $1; exit}')
@@ -40,45 +44,31 @@ ipid_pkts() {
 	echo "$n"
 }
 
-# nft 表 ganyu 的各类计数，输出 key=value 便于后面读取
+jump_count() {
+	local o f
+	o=$(iptables -t mangle -S OUTPUT 2>/dev/null | grep -c -- '-j IPID_MOD')
+	f=$(iptables -t mangle -S FORWARD 2>/dev/null | grep -c -- '-j IPID_MOD')
+	[ -n "$o" ] || o=0
+	[ -n "$f" ] || f=0
+	echo "$((o + f))"
+}
+
 nft_counts() {
+	# 输出 key=value，供 go 读取；表不存在时全是 0
 	nft list table ip ganyu 2>/dev/null | awk '
 	/counter packets/ {
 		n = 0
-		for (i = 1; i <= NF; i++)
-			if ($i == "packets") n = $(i + 1)
-		if ($0 ~ /to :53/) {
-			if ($0 ~ /udp/) du = n; else dt = n
-		}
+		for (i = 1; i <= NF; i++) if ($i == "packets") n = $(i + 1)
+		if ($0 ~ /to :53/) { if ($0 ~ /udp/) du = n; else dt = n }
 		if ($0 ~ /to :123/) nt = n
 		if ($0 ~ /ttl set 64/) tt = n
 		if ($0 ~ /dport 853/) dk = n
 	}
 	END {
-		printf "dns_udp=%d\ndns_tcp=%d\nntp=%d\nttl=%d\ndot=%d\n",
+		printf "dns_udp=%d dns_tcp=%d ntp=%d ttl=%d dot=%d\n",
 			(du == "" ? 0 : du), (dt == "" ? 0 : dt),
 			(nt == "" ? 0 : nt), (tt == "" ? 0 : tt), (dk == "" ? 0 : dk)
 	}'
-}
-
-# ganyu 表是否存在
-nft_table() {
-	if nft list table ip ganyu >/dev/null 2>&1; then
-		echo "table ip ganyu 已建立"
-	else
-		echo "table ip ganyu 不存在（/etc/init.d/ganyu-guard start）"
-	fi
-}
-
-# UA2F
-ua2f_state() {
-	local p
-	p=$(pidof ua2f 2>/dev/null | awk '{print $1}')
-	if [ -n "$p" ]; then
-		echo "running (pid $p)"
-	else
-		echo "stopped"
-	fi
 }
 
 ua2f_pkts() {
@@ -90,40 +80,63 @@ ua2f_pkts() {
 	echo "$n"
 }
 
-# 门户登录
-ybu_state() {
-	local e
-	e=$(uci -q get ybu.main.enabled)
-	[ -n "$e" ] || e='?'
-	echo "enabled=$e"
+prev_get() { # prev_get key -> 上次的值，取不到给空
+	[ -f "$PREV" ] || return 0
+	sed -n "s/^$1=//p" "$PREV" 2>/dev/null | head -n 1
 }
 
-# IPv6 转发封锁状态（v6 走 SLAAC 每台设备一个全局地址，绕开 v4 那套伪装）
-v6_state() {
-	local out
-	if ! nft list table ip6 ganyu >/dev/null 2>&1; then
-		echo '未封锁（ip6 ganyu 表不存在）'
-		return
+delta_of() { # delta_of key current -> 打印 +N / 首次采样
+	local old
+	old=$(prev_get "$1")
+	if [ -z "$old" ]; then
+		echo "首次采样"
+	else
+		echo "+$(( $2 - old ))"
 	fi
-	out=$(nft list table ip6 ganyu 2>/dev/null | awk '/counter packets/ { n = $3; if (n == "") n = "?"; print n; exit }')
-	[ -n "$out" ] || out='?'
-	echo "转发已 DROP（已拦 $out 包）"
 }
 
-# flow offloading（必须为 0，否则 nat 加速会绕过 POSTROUTING，rkp-ipid 收不到包）
-offload_state() {
+offload_pair() {
 	local a b
 	a=$(uci -q get firewall.@defaults[0].flow_offloading)
 	b=$(uci -q get firewall.@defaults[0].flow_offloading_hw)
-	[ -n "$a" ] || a='未设置'
-	[ -n "$b" ] || b='未设置'
-	echo "$a / hw $b"
+	echo "${a:-未设置}/${b:-未设置}"
 }
 
-# 无线 STA 与 WAN
+wan_dev() {
+	local d
+	d=$(ifstatus wan 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null)
+	if [ -z "$d" ]; then d=$(uci -q get network.wan.device); fi
+	echo "$d"
+}
+
+wan_ip() {
+	local ip
+	ip=$(ifstatus wan 2>/dev/null | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)
+	echo "${ip:-无地址}"
+}
+
+v6_global() {
+	local d
+	d=$(wan_dev)
+	[ -n "$d" ] || { echo 0; return; }
+	ip -6 addr show dev "$d" 2>/dev/null | grep -c 'scope global'
+}
+
+v6_allrouters() {
+	local d
+	d=$(wan_dev)
+	[ -n "$d" ] || { echo 0; return; }
+	ip -6 maddr show dev "$d" 2>/dev/null | grep -c 'ff02::2'
+}
+
+v6_fwd() {
+	local d
+	d=$(wan_dev)
+	[ -n "$d" ] || { echo "?"; return; }
+	cat "/proc/sys/net/ipv6/conf/$d/forwarding" 2>/dev/null
+}
+
 sta_info() {
-	# iwinfo 的输出列位置不固定（phy1-sta0 ESSID: "YBU" / Mode: Client  Channel: 44 ...），
-	# 所以按标签取子串，不按 $N 取字段。
 	iwinfo phy1-sta0 info 2>/dev/null | awk '
 		/ESSID:/   { i = index($0, "ESSID:");   e = substr($0, i + 6); sub(/^ +/, "", e) }
 		/Signal:/  { i = index($0, "Signal:");  s = substr($0, i + 7); sub(/^ +/, "", s); sub(/ .*/, "", s) }
@@ -133,60 +146,237 @@ sta_info() {
 		}
 		END {
 			if (e == "") { print "未连接"; exit }
-			printf "%s  %s dBm  ch%s  信号质量 %s", e, s, c, q
+			printf "%s  %s dBm  ch%s  %s", e, s, c, q
 		}'
 }
 
-wan_ip() {
-	local ip
-	ip=$(ifstatus wan 2>/dev/null | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)
-	[ -n "$ip" ] || ip='无地址'
-	echo "$ip"
-}
+# ---- 判定 ----------------------------------------------------------------
 
-# 最近日志
-recent_log() {
-	logread 2>/dev/null | grep -iE 'ganyu|rkp-ipid|ybu-login|ua2f' | tail -n 5
+checks() {
+	local ipd tt ttl dns_u dns_t uaq off hn wanauto tcpst
+
+	ipd=$(ipid_pkts)
+	tt=$(nft_counts)
+	ttl=$(echo "$tt" | sed -n 's/.*ttl=\([0-9]*\).*/\1/p')
+	dns_u=$(echo "$tt" | sed -n 's/.*dns_udp=\([0-9]*\).*/\1/p')
+	dns_t=$(echo "$tt" | sed -n 's/.*dns_tcp=\([0-9]*\).*/\1/p')
+	uaq=$(ua2f_pkts)
+	off=$(offload_pair)
+	wanauto=$(uci -q get network.wan.auto)
+
+	# 1. IPID 内核模块
+	if [ -d /sys/module/rkp_ipid ]; then
+		chk ipid_ko pass 'IPID 内核模块' 'rkp_ipid 已加载'
+	else
+		chk ipid_ko fail 'IPID 内核模块' 'rkp_ipid 未加载，IPID 完全没被改写'
+	fi
+
+	# 2. IPID 规则链
+	if [ "$(jump_count)" -ge 2 ] 2>/dev/null; then
+		chk ipid_rule pass 'IPID 规则链' 'OUTPUT + FORWARD 都挂上了 IPID_MOD'
+	else
+		chk ipid_rule fail 'IPID 规则链' "跳转不足（当前 $(jump_count) 条，需要 2 条）"
+	fi
+
+	# 3. IPID 活性（规则在但没包 = 静默失效）
+	chk ipid_active pass 'IPID 活性' "累计 $ipd 包，本次 $(delta_of ipid "$ipd")"
+
+	# 4. TTL 规则
+	if nft list table ip ganyu >/dev/null 2>&1; then
+		chk ttl_rule pass 'TTL 规则' "table ip ganyu 在，累计 $ttl 包"
+	else
+		chk ttl_rule fail 'TTL 规则' 'table ip ganyu 不存在（ganyu-guard start）'
+	fi
+
+	# 5. TTL 活性
+	chk ttl_active pass 'TTL 活性' "本次 $(delta_of ttl "$ttl")，累计 $ttl 包"
+
+	# 6. TCP 时间戳
+	if [ -d /sys/module/tcpts_strip ]; then
+		tcpst=$(cat /sys/module/tcpts_strip/parameters/strip_syn 2>/dev/null)
+		chk tcpts pass 'TCP 时间戳' "tcpts_strip 已加载，strip_syn=${tcpst:-?}"
+	else
+		chk tcpts fail 'TCP 时间戳' 'tcpts_strip 未加载，出网 SYN 会带 TS'
+	fi
+
+	# 7. UA 改写进程
+	if pidof ua2f >/dev/null 2>&1; then
+		chk ua2f_run pass 'UA 改写进程' "ua2f 在跑（pid $(pidof ua2f | awk '{print $1}')）"
+	else
+		chk ua2f_run fail 'UA 改写进程' 'ua2f 没在跑，明文 HTTP 的 UA 原样出网'
+	fi
+
+	# 8. UA 队列活性
+	chk ua2f_active pass 'UA 队列' "本次 $(delta_of ua2f "$uaq")，累计 $uaq 包"
+
+	# 9. DNS 劫持
+	if [ "$((dns_u + dns_t))" -gt 0 ] 2>/dev/null; then
+		chk dns pass 'DNS 劫持' "UDP $dns_u / TCP $dns_t，本次 $(delta_of dns "$((dns_u + dns_t))")"
+	else
+		chk dns warn 'DNS 劫持' '规则在但还没命中（没有客户端查 DNS？）'
+	fi
+
+	# 10. DoT 封锁（0 命中是正常的：没人用 853）
+	if nft list table ip ganyu >/dev/null 2>&1; then
+		chk dot pass 'DoT 封锁' '853 规则在（命中 0 属正常）'
+	else
+		chk dot fail 'DoT 封锁' 'table ip ganyu 不存在'
+	fi
+
+	# 11. IPv6 兜底
+	local g6 a6 f6
+	g6=$(v6_global); a6=$(v6_allrouters); f6=$(v6_fwd)
+	if [ "${g6:-0}" -gt 0 ] 2>/dev/null; then
+		chk v6 fail 'IPv6 兜底' "WAN 上出现 $g6 个全局地址，可能已经泄漏"
+	elif [ "${a6:-0}" -gt 0 ] 2>/dev/null; then
+		chk v6 warn 'IPv6 兜底' '还在 join ff02::2（All-Routers），会自报是路由器'
+	elif [ "$f6" = "0" ]; then
+		chk v6 pass 'IPv6 兜底' '无全局地址、无 ff02::2、forwarding=0'
+	else
+		chk v6 pass 'IPv6 兜底' "forwarding=${f6:-?}"
+	fi
+
+	# 12. DHCP 主机名
+	hn=$(uci -q get network.wan.hostname)
+	if [ -z "$hn" ]; then
+		local live
+		live=$(ps w 2>/dev/null | grep '[u]dhcpc' | sed -n 's/.*hostname:\([^ ]*\).*/\1/p')
+		hn="$live"
+	fi
+	case "$hn" in
+		''|OpenWrt*) chk dhcp_host warn 'DHCP 主机名' "仍是 ${hn:-默认值}，会在 DHCP 里自报 OpenWrt" ;;
+		*)           chk dhcp_host pass 'DHCP 主机名' "对外报 $hn" ;;
+	esac
+
+	# 13. 管理面临界
+	local bad
+	bad=$(netstat -lnt 2>/dev/null | awk '$4 ~ /^0\.0\.0\.0:(22|80|443|7681)$/ {print $4}' | tr '\n' ' ')
+	if [ -n "$bad" ]; then
+		chk mgmt warn '管理面绑定' "仍在 0.0.0.0 上听：$bad（重启对应服务后生效）"
+	else
+		chk mgmt pass '管理面绑定' 'uhttpd/dropbear/ttyd 都只听 LAN'
+	fi
+
+	# 14. flow offloading（必须 0，否则 NAT 加速绕过 POSTROUTING）
+	case "$off" in
+		0/0) chk offload pass '流量卸载' 'flow offloading 0 / hw 0' ;;
+		未设置/*|*/未设置) chk offload warn '流量卸载' "uci 未显式设置（$off），依赖默认值" ;;
+		*)   chk offload fail '流量卸载' "offloading 开着（$off），rkp-ipid 收不到包" ;;
+	esac
+
+	# 15. 起网门禁
+	if [ "$wanauto" = "0" ]; then
+		chk gate pass '起网门禁' 'network.wan.auto=0，由 ybu-wan-gate 决定什么时候起网'
+	else
+		chk gate warn '起网门禁' "network.wan.auto=${wanauto:-未设置}，开机会立刻起网"
+	fi
+
+	# 16. 保留服务
+	local svc bad_svc=''
+	for svc in ganyu-guard rkp-ipid-mark ua2f ybu-login; do
+		[ -x "/etc/init.d/$svc" ] || continue
+		if /etc/init.d/$svc running >/dev/null 2>&1; then :; else bad_svc="$bad_svc $svc"; fi
+	done
+	if [ -n "$bad_svc" ]; then
+		chk services warn '常驻服务' "没在跑：$bad_svc"
+	else
+		chk services pass '常驻服务' 'ganyu-guard / rkp-ipid-mark / ua2f / ybu-login 都在跑'
+	fi
+
+	# 落盘给下一轮算差值
+	{
+		echo "ipid=$ipd"
+		echo "ttl=$ttl"
+		echo "dns=$((dns_u + dns_t))"
+		echo "ua2f=$uaq"
+	} >"$PREV"
 }
 
 # ---- 输出 ----------------------------------------------------------------
 
-main() {
-	local c
-	c=$(nft_counts)
-
-	printf '反检测状态  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')"
-	echo '────────────────────────────────────────────'
-
-	printf 'IPID  内核模块   %s\n' "$(ko_state)"
-	printf 'IPID  规则链     %s\n' "$(jump_state)"
-	printf 'IPID  已改写     %s 包\n' "$(ipid_pkts)"
-	echo
-
-	printf 'nft   %s\n' "$(nft_table)"
-	printf 'DNS   劫持 53     UDP %s / TCP %s 包 → 本机 dnsmasq\n' \
-		"$(echo "$c" | sed -n 's/^dns_udp=//p')" \
-		"$(echo "$c" | sed -n 's/^dns_tcp=//p')"
-	printf 'NTP   强制本地     %s 包 → 本机 ntpd\n' "$(echo "$c" | sed -n 's/^ntp=//p')"
-	printf 'TTL   统一 64      %s 包\n' "$(echo "$c" | sed -n 's/^ttl=//p')"
-	printf 'DoT   853 封锁     %s 包\n' "$(echo "$c" | sed -n 's/^dot=//p')"
-	printf 'IPv6  转发封锁     %s\n' "$(v6_state)"
-	printf '流量卸载 flow offloading  %s（必须 0）\n' "$(offload_state)"
-	echo
-
-	printf 'UA    ua2f        %s\n' "$(ua2f_state)"
-	printf 'UA    队列放行     %s 包\n' "$(ua2f_pkts)"
-	printf '门户  ybu-login   %s\n' "$(ybu_state)"
-	echo
-
-	printf '无线  STA         %s\n' "$(sta_info)"
-	printf '网络  WAN         %s\n' "$(wan_ip)"
-	echo
-
-	echo '最近日志'
-	echo '────────────────────────────────────────────'
-	recent_log
+overall() {
+	if [ "$N_FAIL" -gt 0 ]; then echo fail
+	elif [ "$N_WARN" -gt 0 ]; then echo warn
+	else echo pass; fi
 }
 
-main
+alarm_of() {
+	[ -f /tmp/ganyu-alarm ] || return 0
+	head -n 1 /tmp/ganyu-alarm 2>/dev/null
+}
+
+print_plain() {
+	local state id name msg mark al
+	al=$(alarm_of)
+	if [ -n "$al" ]; then
+		echo '############################################################'
+		echo "#  已自动断网（fail-closed）"
+		echo "#  $al"
+		echo '#  确认无误后点下面「恢复」，或执行 ganyu-guard rearm'
+		echo '############################################################'
+		echo
+	fi
+	printf '反检测体检  %s   总数 %s/%s 项  ' "$(date '+%Y-%m-%d %H:%M:%S')" \
+		"$((N_PASS + N_WARN + N_FAIL))" "$((N_PASS + N_WARN + N_FAIL + N_NA))"
+	case "$(overall)" in
+		pass) echo '整体 PASS' ;;
+		warn) echo "整体 WARN（$N_WARN 项要注意）" ;;
+		*)    echo "整体 FAIL（$N_FAIL 项失效）" ;;
+	esac
+	echo '────────────────────────────────────────────'
+	printf '%s\n' "$ITEMS" | while IFS='|' read -r id state name msg; do
+		[ -n "$id" ] || continue
+		case "$state" in
+			pass) mark='[PASS]' ;;
+			warn) mark='[WARN]' ;;
+			fail) mark='[FAIL]' ;;
+			*)    mark='[ NA ]' ;;
+		esac
+		printf '%s %-16s %s\n' "$mark" "$name" "$msg"
+	done
+	echo '────────────────────────────────────────────'
+	printf '无线 STA  %s\n' "$(sta_info)"
+	printf '网络 WAN  %s\n' "$(wan_ip)"
+	echo '最近事件'
+	if [ -f "$EVENTS" ]; then tail -n 10 "$EVENTS"; else echo '（还没有事件记录）'; fi
+}
+
+print_json() {
+	local sep='' id state name msg line al
+	al=$(alarm_of)
+	printf '{"ts":"%s","overall":"%s","alarm":"%s","counts":{"pass":%s,"warn":%s,"fail":%s,"na":%s},"items":[' \
+		"$(date '+%Y-%m-%d %H:%M:%S')" "$(overall)" "$(printf '%s' "$al" | tr -d '"\\')" \
+		"$N_PASS" "$N_WARN" "$N_FAIL" "$N_NA"
+	while IFS='|' read -r id state name msg; do
+		[ -n "$id" ] || continue
+		printf '%s{"id":"%s","state":"%s","name":"%s","msg":"%s"}' "$sep" "$id" "$state" "$name" "$msg"
+		sep=','
+	done <<EOF
+$ITEMS
+EOF
+	printf '],"wan":"%s","sta":"%s","events":[' "$(wan_ip)" "$(sta_info)"
+	sep=''
+	if [ -f "$EVENTS" ]; then
+		while IFS= read -r line; do
+			printf '%s"%s"' "$sep" "$(printf '%s' "$line" | tr -d '"\\')"
+			sep=','
+		done <<EOF
+$(tail -n 10 "$EVENTS")
+EOF
+	fi
+	printf ']}'
+}
+
+print_verdict() {
+	cat "$VERDICT"
+}
+
+: >"$VERDICT"
+checks
+
+case "$1" in
+	--json)    print_json; echo ;;
+	--verdict) print_verdict ;;
+	*)         print_plain ;;
+esac
 exit 0

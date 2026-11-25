@@ -29,3 +29,10 @@ config main 'main'
 	#     逐台识别（EUI-64 里还带 MAC）。实测目前校园网没有 v6 出口，这条现在
 	#     零代价；哪天学校开了 v6，它保证不会静默泄漏成"三台机器各自上网"。
 	option block_ipv6 '1'
+	# 1 = 出事自动断网（fail-closed）。ganyu-watch 每 60 秒体检一次，致命项
+	#     （IPID 模块/规则、TTL 规则、tcpts 模块、ua2f 进程、IPv6 泄漏、计数停滞）
+	#     连续 3 轮都没修好，就把 WAN 整个停掉。只停 WAN，LAN/SSH 照常。
+	#     0 = 只记录不动网（调试用）。
+	option killswitch '1'
+	# 连续几轮才动手（60 秒一轮 → 3 轮 = 3 分钟）
+	option kill_confirm '3'
